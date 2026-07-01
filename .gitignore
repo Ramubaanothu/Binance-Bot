@@ -1,0 +1,30 @@
+# ── API keys (NEVER commit real keys) ─────────────────────────────────────
+trading/config.py
+
+# ── Runtime state (regenerated on each bot start) ─────────────────────────
+trading/positions_binance.json
+trading/trades_binance.json
+
+# ── Logs ──────────────────────────────────────────────────────────────────
+*.log
+
+# ── Python cache ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── Claude Code internal ───────────────────────────────────────────────────
+.claude/
