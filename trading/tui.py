@@ -751,16 +751,13 @@ def _stats(S: dict) -> Panel:
     title = '[bold]⚡ STATS[/]'
     return Panel(t, title=title, border_style='bright_black', expand=True)
 
-# ─── Panel: Balance Chart ─────────────────────────────────────────────────────
-_SPARK = '▁▂▃▄▅▆▇█'
-
+# ─── Panel: Balance Chart (full-width line chart) ─────────────────────────────
 def _balance_chart(S: dict) -> Panel:
     global _bal_last_ts
     bal  = S.get('balance', 0.0)
     dpnl = S.get('daily_pnl', 0.0)
     tpnl = S.get('total_pnl', 0.0)
 
-    # Record a new datapoint at most every 30 s, or when balance shifts by >$0.05
     now = time.time()
     if bal > 0:
         last_val = _balance_history[-1][1] if _balance_history else 0.0
@@ -768,67 +765,96 @@ def _balance_chart(S: dict) -> Panel:
             _balance_history.append((now, bal))
             _bal_last_ts = now
 
-    vals = [v for _, v in _balance_history]
+    vals   = [v for _, v in _balance_history]
+    n      = len(vals)
+    mins   = int((now - _balance_history[0][0]) / 60) if _balance_history else 0
+    ses_pct = (vals[-1] - vals[0]) / vals[0] * 100 if n >= 2 and vals[0] else 0.0
+    ses_col  = 'bright_green' if ses_pct >= 0 else 'bright_red'
     dpnl_col = 'bright_green' if dpnl >= 0 else 'bright_red'
     tpnl_col = 'bright_green' if tpnl >= 0 else 'bright_red'
 
-    body = Text()
-    body.append(f'  ${bal:>12,.2f}\n', style='bold bright_white')
-    body.append('  Day  ', style='dim')
-    body.append(f'{dpnl:+,.2f}', style=f'bold {dpnl_col}')
-    body.append('   Total  ', style='dim')
-    body.append(f'{tpnl:+,.2f}\n', style=f'bold {tpnl_col}')
+    # Stats line always shown at top
+    stats = Text()
+    stats.append(f'  ${bal:,.2f}  ', style='bold bright_white')
+    stats.append('Day ', style='dim')
+    stats.append(f'{dpnl:+,.2f}  ', style=f'bold {dpnl_col}')
+    stats.append('Total ', style='dim')
+    stats.append(f'{tpnl:+,.2f}  ', style=f'bold {tpnl_col}')
+    stats.append('Session ', style='dim')
+    stats.append(f'{ses_pct:+.3f}%  ', style=f'bold {ses_col}')
+    stats.append(f'[{n}pts / {mins}min]\n', style='dim')
 
-    if len(vals) < 3:
-        body.append('\n  Collecting data…\n', style='dim')
-        body.append('  Chart appears after\n', style='dim')
-        body.append('  30 seconds\n', style='dim')
-        return Panel(body, title='[bold bright_green]BALANCE[/]',
+    if n < 3:
+        stats.append('\n  Collecting balance history — line chart appears after ~60 seconds\n', style='dim')
+        return Panel(stats, title='[bold bright_green]BALANCE CHART[/]',
                      border_style='green', expand=True)
 
     lo  = min(vals)
     hi  = max(vals)
-    rng = hi - lo
-
-    # Downsample to fit width (~32 chars)
-    w       = 32
-    step    = max(1, len(vals) // w)
-    sampled = vals[::step][-w:]
-
-    # Build sparkline
-    spark = Text()
+    rng = hi - lo if (hi - lo) > 0.001 else 1.0
     start_val = vals[0]
-    for v in sampled:
-        idx = int((v - lo) / rng * 7) if rng > 0.001 else 3
-        col = 'bright_green' if v >= start_val else 'bright_red'
-        spark.append(_SPARK[idx], style=col)
 
-    # Session change %
-    ses_pct = (vals[-1] - vals[0]) / vals[0] * 100 if vals[0] else 0
-    ses_col = 'bright_green' if ses_pct >= 0 else 'bright_red'
+    CHART_H = 5     # number of chart rows
+    CHART_W = 120   # max data columns (terminal clips any excess)
 
-    # High/low in session
-    body.append(f'\n  Hi  ${hi:>10,.2f}\n', style='dim green')
-    body.append(f'  Lo  ${lo:>10,.2f}\n\n', style='dim red')
+    if n > CHART_W:
+        step    = n / CHART_W
+        sampled = [vals[int(i * step)] for i in range(CHART_W)]
+    else:
+        sampled = vals
+    W = len(sampled)
 
-    # Sparkline
-    body.append('  ', style='')
-    body.append_text(spark)
-    body.append('\n', style='')
-    body.append('  ', style='dim')
-    body.append(f'{"←60min":<16}{"now→":>16}\n', style='dim')
+    def to_row(v: float) -> int:
+        return round((v - lo) / rng * (CHART_H - 1))
 
-    body.append(f'\n  Session  ', style='dim')
-    body.append(f'{ses_pct:+.3f}%', style=f'bold {ses_col}')
+    y_vals = [to_row(v) for v in sampled]
 
-    n = len(vals)
-    mins = int((now - _balance_history[0][0]) / 60) if _balance_history else 0
-    body.append(f'   [{n}pts/{mins}m]\n', style='dim')
+    # Y-axis labels (index 0 = topmost display row = highest value)
+    y_labels = [f'${lo + (r / (CHART_H - 1)) * rng:,.2f}'
+                for r in range(CHART_H - 1, -1, -1)]
+    max_lw = max(len(lb) for lb in y_labels)
+
+    body = stats
+
+    for di, chart_row in enumerate(range(CHART_H - 1, -1, -1)):
+        label = y_labels[di]
+        body.append(f'  {label:>{max_lw}} ┤', style='dim')
+        for col in range(W):
+            y       = y_vals[col]
+            pt_col  = 'bright_green' if sampled[col] >= start_val else 'bright_red'
+            if y == chart_row:
+                body.append('─', style=pt_col)
+            elif col > 0:
+                y_prev = y_vals[col - 1]
+                lo_y   = min(y_prev, y)
+                hi_y   = max(y_prev, y)
+                if lo_y < chart_row < hi_y:
+                    body.append('│', style=pt_col)
+                else:
+                    body.append(' ')
+            else:
+                body.append(' ')
+        body.append('\n')
+
+    # X-axis rule
+    body.append(f'  {" " * max_lw} └', style='dim')
+    body.append('─' * W, style='bright_black')
+    body.append('\n')
+    # Time labels
+    ago_str = f'← {mins}min ago'
+    now_str = 'now →'
+    gap = W - len(ago_str) - len(now_str)
+    body.append(f'  {" " * (max_lw + 1)} ', style='dim')
+    body.append(ago_str, style='dim')
+    if gap > 0:
+        body.append(' ' * gap, style='dim')
+    body.append(now_str, style='dim')
 
     title_col = 'bright_green' if ses_pct >= 0 else 'bright_red'
     title = (
-        f'[bold bright_green]BALANCE[/]  '
-        f'[{title_col}]{ses_pct:+.2f}%[/{title_col}]'
+        f'[bold bright_green]BALANCE CHART[/]  '
+        f'[{title_col}]{ses_pct:+.3f}%[/]  '
+        f'[dim]Hi ${hi:,.2f}   Lo ${lo:,.2f}[/dim]'
     )
     return Panel(body, title=title, border_style='green', expand=True)
 
@@ -849,10 +875,11 @@ def _footer() -> Rule:
 def _build(S: dict, frame: int) -> Layout:
     layout = Layout()
     layout.split_column(
-        Layout(name='header',  size=5),
+        Layout(name='header',    size=5),
         Layout(name='body'),
-        Layout(name='trades',  size=12),
-        Layout(name='footer',  size=1),
+        Layout(name='bal_chart', size=9),   # full-width balance line chart
+        Layout(name='trades',    size=10),
+        Layout(name='footer',    size=1),
     )
     layout['body'].split_row(
         Layout(name='positions', ratio=7),
@@ -861,15 +888,14 @@ def _build(S: dict, frame: int) -> Layout:
     )
     layout['body']['right_col'].split_column(
         Layout(name='gauges', size=5),
-        Layout(name='market', ratio=3),
-        Layout(name='chart',  ratio=2),
+        Layout(name='market', ratio=1),     # market fills all freed space
     )
     layout['header'].update(_header(S))
     layout['body']['positions'].update(_positions(S))
     layout['body']['scanner'].update(_scanner(S, frame))
     layout['body']['right_col']['gauges'].update(_gauges(S))
     layout['body']['right_col']['market'].update(_market(S, frame))
-    layout['body']['right_col']['chart'].update(_balance_chart(S))
+    layout['bal_chart'].update(_balance_chart(S))
     layout['trades'].update(_trades(S))
     layout['footer'].update(_footer())
     return layout
