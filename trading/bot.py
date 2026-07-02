@@ -1096,6 +1096,8 @@ class AlphaBot:
 
         direction = a['direction']
         min_conf  = session_min_conf()
+        if sym in config.MAJOR_LEVERAGE:
+            min_conf -= config.MAJOR_CONF_DISCOUNT   # majors: cleaner signals, lower bar
         conf      = a['confidence']
 
         if conf < min_conf:
@@ -1733,7 +1735,9 @@ class AlphaBot:
                 r = {k: v for k, v in a.items() if k != 'sig'}
                 scan_results.append(r)
 
-                if a['confidence'] >= min_conf:
+                _thr = (min_conf - config.MAJOR_CONF_DISCOUNT
+                        if sym in config.MAJOR_LEVERAGE else min_conf)
+                if a['confidence'] >= _thr:
                     reject = None
                     if a['atr_pct'] < 0.2:
                         reject = f"ATR={a['atr_pct']:.2f}% — too flat"
