@@ -416,6 +416,7 @@ class AlphaBot:
         self._last_risk_sync = 0.0   # unix ts of last positionRisk sync
         self._mark_prices: dict[str, float] = {}   # real-time mark prices pushed by Binance
         self._mark_stream_ts = 0.0                 # last mark-price push received
+        self._upd_busy = False                     # re-entry guard for live update loop
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -1615,20 +1616,16 @@ class AlphaBot:
                 pass
 
             loop = asyncio.get_event_loop()
-            for _scan_i, sym in enumerate(scan_syms):
-                if not self.running: break
-                # Refresh open positions every 30 coins so dashboard stays live during long scans
-                if _scan_i > 0 and _scan_i % 30 == 0 and self.positions:
-                    try:
-                        await self.update_positions()
-                        await self.push()
-                    except Exception:
-                        pass
-                try:
-                    ph = _prices.get(sym, 0.0)
-                    a  = await loop.run_in_executor(None, self.analyse_symbol, sym, ph)
-                except Exception as _sym_err:
-                    log.warning(f"[SCAN] {sym}: {_sym_err}")
+            _par = max(1, getattr(config, 'SCAN_PARALLEL', 6))
+            for _ci in range(0, len(scan_syms), _par):
+              if not self.running: break
+              _chunk   = scan_syms[_ci:_ci + _par]
+              _futs    = [loop.run_in_executor(None, self.analyse_symbol, s, _prices.get(s, 0.0))
+                          for s in _chunk]
+              _results = await asyncio.gather(*_futs, return_exceptions=True)
+              for sym, a in zip(_chunk, _results):
+                if isinstance(a, Exception):
+                    log.warning(f"[SCAN] {sym}: {a}")
                     continue
                 if a is None: continue
 
@@ -1676,16 +1673,9 @@ class AlphaBot:
             )
             await self.push()
 
+            # Position updates + dashboard pushes run in _live_update_loop (always on)
             for _ in range(config.SCAN_INTERVAL_SEC):
                 if not self.running: break
-                try:
-                    await self.update_positions()
-                except Exception as _upd_err:
-                    log.error(f"[UPDATE_POS] {_upd_err}")
-                try:
-                    await self.push()
-                except Exception as _push_err:
-                    log.error(f"[PUSH] {_push_err}")
                 await asyncio.sleep(1)
 
           except Exception as _cycle_err:
@@ -1693,6 +1683,22 @@ class AlphaBot:
             log.error(f"[SCAN CYCLE CRASH] {_cycle_err}\n{_tb2.format_exc()}")
             log.info("[SCAN CYCLE] Auto-recovering in 10s...")
             await asyncio.sleep(10)
+
+    async def _live_update_loop(self):
+        """Always-on 1-second heartbeat: refresh positions from real-time mark
+        prices and push to the dashboard — even while a scan is running."""
+        while self.running:
+            try:
+                if not self._upd_busy:
+                    self._upd_busy = True
+                    try:
+                        await self.update_positions()
+                        await self.push()
+                    finally:
+                        self._upd_busy = False
+            except Exception as e:
+                log.error(f"[LIVE] {e}")
+            await asyncio.sleep(1)
 
     # ── Real-time Binance streams (push, not poll) ────────────────────────────
     async def _mark_price_stream(self):
@@ -1783,6 +1789,8 @@ class AlphaBot:
         # Real-time push streams from Binance (auto-reconnect, REST stays as fallback)
         asyncio.get_event_loop().create_task(self._mark_price_stream())
         asyncio.get_event_loop().create_task(self._user_data_stream())
+        # Always-on 1s dashboard heartbeat — live values even mid-scan
+        asyncio.get_event_loop().create_task(self._live_update_loop())
         sep = '=' * 70
         dash= '-' * 70
         print(sep)
