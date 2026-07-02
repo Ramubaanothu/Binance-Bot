@@ -1813,9 +1813,9 @@ class AlphaBot:
                     reject = None
                     if a['atr_pct'] < 0.2:
                         reject = f"ATR={a['atr_pct']:.2f}% — too flat"
-                    elif a['ls_ratio'] > 2.5 and a['direction'] == 'long':
+                    elif a['ls_ratio'] > 3.0 and a['direction'] == 'long':
                         reject = f"L/S={a['ls_ratio']:.1f} — longs overcrowded"
-                    elif a['ls_ratio'] < 0.4 and a['direction'] == 'short':
+                    elif a['ls_ratio'] < 0.33 and a['direction'] == 'short':
                         reject = f"L/S={a['ls_ratio']:.1f} — shorts overcrowded"
 
                     if reject:
@@ -2026,6 +2026,9 @@ class AlphaBot:
         # Log any asyncio task exception that would otherwise be silently swallowed
         def _async_exc_handler(loop, context):
             exc = context.get('exception', context.get('message', '?'))
+            if 'keepalive ping timeout' in str(exc):
+                log.debug(f"[STREAM ] keepalive drop (auto-reconnects): {exc}")
+                return   # testnet stream drops pings every few minutes — routine
             log.error(f"[ASYNCIO UNHANDLED] {exc}")
         asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
 
