@@ -426,6 +426,7 @@ class AlphaBot:
         self._blocked_signals: dict[str, float] = {}  # sym → ts: passed gates but no slot free
         self._retry_busy = False                   # re-entry guard for blocked-signal retry
         self._vol24: dict[str, float] = {}         # sym → 24h quote volume (liquidity tiering)
+        self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -762,6 +763,7 @@ class AlphaBot:
             'win_rate':     wr,
             'max_dd':       dd,
             'scan_count':   self.scan_count,
+            'scan_progress': self.scan_progress,
             'session':      current_session(),
             'paused':       self.paused,
             'pause_reason': self.pause_reason,
@@ -1720,9 +1722,11 @@ class AlphaBot:
 
             loop = asyncio.get_event_loop()
             _par = max(1, getattr(config, 'SCAN_PARALLEL', 6))
+            self.scan_progress = {'done': 0, 'total': len(scan_syms), 'sym': ''}
             for _ci in range(0, len(scan_syms), _par):
               if not self.running: break
               _chunk   = scan_syms[_ci:_ci + _par]
+              self.scan_progress = {'done': _ci, 'total': len(scan_syms), 'sym': _chunk[0]}
               _futs    = [loop.run_in_executor(None, self.analyse_symbol, s, _prices.get(s, 0.0))
                           for s in _chunk]
               _results = await asyncio.gather(*_futs, return_exceptions=True)

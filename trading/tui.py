@@ -20,6 +20,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -536,36 +537,73 @@ def _scanner(S: dict, frame: int) -> Panel:
 
     body = Text()
 
-    # Status line
+    # ── Live scan progress bar — updates every second even mid-scan ──────────
+    prog  = S.get('scan_progress') or {}
+    p_done, p_tot = prog.get('done', 0), prog.get('total', 0)
     if _connected:
         body.append(f'  {spin} ', style=TEAL)
-        body.append(f'LIVE  #{scan_n}   ', style=CYAN2)
-        body.append(f'{pass_n} SIGNALS  ', style=TEAL)
-        body.append(f'{fail_n} FILTERS  ', style=AMBER)
-        body.append(f'{exec_n} EXEC  ', style=f'bold {TEAL}')
-        body.append(f'{exit_n} EXITS\n\n', style=PINK)
+        body.append(f'#{scan_n} ', style=CYAN2)
+        if p_tot:
+            bw     = 22
+            filled = max(0, min(bw, round(p_done / p_tot * bw)))
+            body.append('▰' * filled, style=TEAL)
+            body.append('▱' * (bw - filled), style='grey15')
+            body.append(f' {p_done}/{p_tot} ', style=f'bold {TXT}')
+            body.append(f'{prog.get("sym","")}\n', style=FAINT)
+        else:
+            body.append('waiting for scan…\n', style=FAINT)
+        body.append('  ', style='')
+        body.append(f'{pass_n}', style=f'bold {TEAL}')
+        body.append(' sig  ', style=FAINT)
+        body.append(f'{fail_n}', style=f'bold {AMBER}')
+        body.append(' fil  ', style=FAINT)
+        body.append(f'{exec_n}', style=f'bold {TEAL}')
+        body.append(' exec  ', style=FAINT)
+        body.append(f'{exit_n}', style=f'bold {PINK}')
+        body.append(' exit\n\n', style=FAINT)
     else:
         body.append('  ✗ OFFLINE — waiting for bot...\n\n', style=f'bold {PINK}')
 
-    # Log feed — skip pure 'scan' separator lines, show meaningful events
-    max_lines = 28
+    # ── Card-style feed rows: TIME [CHIP] SYMBOL ▲ CONF ▰▰▰▱▱ detail ─────────
+    _sym_re  = re.compile(r'\b([A-Z0-9]{2,20}USDT)\b')
+    _conf_re = re.compile(r'(\d{1,3}(?:\.\d)?)%')
+    max_lines = 26
     shown = 0
     for e in log_lines:
         if shown >= max_lines: break
         etype = e.get('type', 'info')
-        if etype == 'scan': continue   # skip ── Scan separator lines
+        if etype == 'scan': continue
         msg = e.get('msg', '')
         ts  = e.get('ts', '')
-        col, tag = _TYPE_CFG.get(etype, ('dim', '      '))
+        col, tag = _TYPE_CFG.get(etype, (FAINT, '      '))
 
-        # Trim message to fit
-        max_w = 68
-        if len(msg) > max_w:
-            msg = msg[:max_w - 1] + '…'
+        m_sym  = _sym_re.search(msg)
+        sym    = m_sym.group(1) if m_sym else ''
+        m_conf = _conf_re.search(msg) if etype in ('pass', 'fail', 'exec') else None
+        conf   = min(99.0, float(m_conf.group(1))) if m_conf else None
+        is_l   = 'LONG' in msg
+        is_s   = 'SHORT' in msg
 
         body.append(f'  {ts} ', style=FAINT)
-        body.append(f'{tag} ', style=f'bold {col}')
-        body.append(f'{msg}\n', style=col if etype in ('exec', 'exit', 'warn', 'pass') else FAINT)
+        body.append(f'{tag:<6}', style=f'bold {col}')
+        body.append(f' {sym[:13]:<13}', style=f'bold {TXT}' if sym else FAINT)
+        if is_l:   body.append(' ▲', style=f'bold {TEAL}')
+        elif is_s: body.append(' ▼', style=f'bold {PINK}')
+        else:      body.append('  ')
+        if conf is not None:
+            k = max(0, min(5, round(conf / 20)))
+            body.append(f' {conf:>3.0f}% ', style=f'bold {col}')
+            body.append('▰' * k, style=col)
+            body.append('▱' * (5 - k), style='grey15')
+        else:
+            body.append(' ' * 11)
+        # detail: message minus symbol / conf% / direction already shown as chips
+        detail = msg.replace(sym, '', 1).strip(' |—-') if sym else msg
+        detail = re.sub(r'^\d{1,3}(?:\.\d)?%\s*', '', detail)
+        detail = re.sub(r'^(LONG|SHORT)\s*\|?\s*', '', detail).strip(' |')
+        if len(detail) > 34: detail = detail[:33] + '…'
+        body.append(f'  {detail}\n',
+                    style=col if etype in ('exec', 'exit', 'warn', 'pass') else FAINT)
         shown += 1
 
     title = (
