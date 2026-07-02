@@ -940,10 +940,12 @@ class AlphaBot:
         if sig.direction == 'short' and funding < -0.08: score *= 0.85
         score = max(-100, min(100, score))
 
-        # Volume ratio: current candle volume vs 20-bar average (breakout confirmation)
+        # Volume ratio: last CLOSED candle vs 20-bar average. The forming candle
+        # must be excluded — early in a candle its volume is ~0 and every valid
+        # signal was being rejected as "no breakout volume".
         try:
-            vols = [float(k[5]) for k in raw5[-21:]]
-            vol_ratio = vols[-1] / (sum(vols[:-1]) / len(vols[:-1])) if vols[:-1] else 1.0
+            vols = [float(k[5]) for k in raw5[-22:-1]]   # closed candles only
+            vol_ratio = vols[-1] / (sum(vols[:-1]) / len(vols[:-1])) if len(vols) > 1 else 1.0
         except:
             vol_ratio = 1.0
 
@@ -1123,7 +1125,7 @@ class AlphaBot:
                 self.emit('fail', f"{sym} ${vol24/1e6:.0f}M vol small-cap needs "
                                   f"{min_conf+config.SMALLCAP_EXTRA_CONF:.0f}%+ got {conf:.0f}% → SKIP"); return
         if self.sector_count(sym) >= config.MAX_CORRELATED_PAIRS:
-            self.emit('fail', f"{sym} sector cap → SKIP"); return
+            self.emit('fail', f"{sym} sector cap ({self.sector.get(sym, 'Other')}) → SKIP"); return
         if a['atr_pct'] > 4.0:
             self.emit('fail', f"{sym} ATR={a['atr_pct']:.1f}% → too volatile → SKIP"); return
         if a['atr_pct'] < 0.30:
@@ -1273,8 +1275,8 @@ class AlphaBot:
         # margin cap: one trade may never use more than 20% of equity as margin
         notional = min(notional, self.balance * lev * 0.20)
         if notional < config.MIN_NOTIONAL_USDT:
-            notional = config.MIN_NOTIONAL_USDT           # exchange minimum
-            if notional / lev > self.balance * 0.20:
+            notional = config.MIN_NOTIONAL_USDT           # exchange minimum — bump up
+            if notional / lev > self.balance * 0.50:      # truly unaffordable only
                 self.emit('fail', f"{sym} balance too small for exchange min order → SKIP"); return
 
         raw_qty = notional / price
