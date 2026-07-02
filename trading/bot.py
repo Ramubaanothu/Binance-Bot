@@ -1260,9 +1260,16 @@ class AlphaBot:
             venue_px = self.client.price(sym)
         except Exception:
             self.emit('fail', f"{sym} no venue price → SKIP"); return
-        if a['price'] > 0 and abs(venue_px - a['price']) / a['price'] > 0.007:
+        # Anchoring ALL price levels (entry/SL/TP) to the venue price makes the
+        # geometry internally consistent — instant-SL from divergence is impossible.
+        # Only extreme divergence (>3%) means the venue's market is a different
+        # animal entirely and the signal can't be trusted there.
+        if a['price'] > 0 and abs(venue_px - a['price']) / a['price'] > 0.03:
             self.emit('fail', f"{sym} venue px {venue_px:.6g} vs market {a['price']:.6g} "
                               f"({(venue_px/a['price']-1)*100:+.1f}%) → diverged → SKIP"); return
+        # scale ATR to venue price so SL/TP distances stay proportionally correct
+        if a['price'] > 0:
+            a['atr'] = a['atr'] * (venue_px / a['price'])
         a['price'] = venue_px
 
         tmp_exits = self.compute_exits(direction, a['price'], a['atr'], sym)
