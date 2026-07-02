@@ -436,6 +436,7 @@ class AlphaBot:
         self._vol24: dict[str, float] = {}         # sym → 24h quote volume (liquidity tiering)
         self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
         self._recently_closed: dict[str, float] = {}   # sym → close ts (reconcile ghost guard)
+        self._sym_cooldown: dict[str, float] = {}      # sym → ts until re-entry allowed after SL
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -1085,6 +1086,8 @@ class AlphaBot:
         sym = a['symbol']
         if sym in self.positions: return
         if not self.guards_ok(): return
+        if time.time() < self._sym_cooldown.get(sym, 0):
+            return   # stopped out recently — no revenge re-entry on the same coin
 
         # ── Max-5 gate with swap-weakest logic ───────────────────────────────
         if len(self.positions) >= config.MAX_POSITIONS:
@@ -1249,6 +1252,19 @@ class AlphaBot:
             self.emit('fail', f"{sym} counter-trend without strong pattern → SKIP"); return
 
         # ── Pro gate 6: R:R check — must be worth the risk ───────────────────
+        # ── Venue price sanity — analysis uses REAL market data but orders fill
+        # on the execution venue. If the venue's price diverges from the analysis
+        # price (testnet artifact), entering means instant SL (HYPEUSDT lost
+        # $775 in 2 min this way). Anchor everything to the venue price.
+        try:
+            venue_px = self.client.price(sym)
+        except Exception:
+            self.emit('fail', f"{sym} no venue price → SKIP"); return
+        if a['price'] > 0 and abs(venue_px - a['price']) / a['price'] > 0.007:
+            self.emit('fail', f"{sym} venue px {venue_px:.6g} vs market {a['price']:.6g} "
+                              f"({(venue_px/a['price']-1)*100:+.1f}%) → diverged → SKIP"); return
+        a['price'] = venue_px
+
         tmp_exits = self.compute_exits(direction, a['price'], a['atr'], sym)
         sign_rr   = +1 if direction == 'long' else -1
         sl_dist   = abs(a['price'] - tmp_exits['sl'])
@@ -1593,6 +1609,8 @@ class AlphaBot:
         del self.positions[sym]
         self._save_positions()
         self._recently_closed[sym] = time.time()   # reconcile ghost guard
+        if not is_win:
+            self._sym_cooldown[sym] = time.time() + 900   # 15-min re-entry ban after a loss
         # A slot just freed — give queued (slot-blocked) signals a fresh shot
         if self._blocked_signals:
             asyncio.get_event_loop().create_task(self._retry_blocked())
