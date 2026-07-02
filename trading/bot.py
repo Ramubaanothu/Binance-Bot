@@ -49,6 +49,9 @@ logging.basicConfig(
 )
 log = logging.getLogger('AlphaBot')
 BASE = 'https://testnet.binancefuture.com'
+# ANALYSIS uses the REAL market's public data (no auth needed) — testnet volumes
+# and indicators are meaningless dust. Orders/account stay on BASE.
+DATA_BASE = 'https://fapi.binance.com'
 # Real-time push streams (mark prices + account events) — matches BASE environment
 WS_STREAM = 'wss://stream.binancefuture.com' if 'testnet' in BASE else 'wss://fstream.binance.com'
 
@@ -98,18 +101,19 @@ class Client:
         sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
         return qs + "&signature=" + sig
 
-    def _get(self, path, params=None, auth=False):
+    def _get(self, path, params=None, auth=False, live_data=False):
         self._throttle()
         params = dict(params or {})
+        base   = DATA_BASE if live_data else BASE
         if auth:
-            url = f"{BASE}{path}?{self._sign(dict(params))}"
+            url = f"{base}{path}?{self._sign(dict(params))}"
         else:
             qs  = '&'.join(f"{k}={v}" for k, v in params.items())
-            url = f"{BASE}{path}?{qs}" if qs else f"{BASE}{path}"
+            url = f"{base}{path}?{qs}" if qs else f"{base}{path}"
         r = self.sess.get(url, timeout=12)
         if auth and r.status_code >= 400 and '-1021' in r.text:
             self.sync_time()   # clock drifted — resync and retry once
-            r = self.sess.get(f"{BASE}{path}?{self._sign(dict(params))}", timeout=12)
+            r = self.sess.get(f"{base}{path}?{self._sign(dict(params))}", timeout=12)
         r.raise_for_status(); return r.json()
 
     def _send(self, method, path, params: dict):
@@ -128,35 +132,39 @@ class Client:
     def _delete(self, path, params: dict):
         return self._send('delete', path, params)
 
-    # ── Public endpoints ──
+    # ── Public MARKET DATA — always from the REAL exchange (live_data=True).
+    #    Testnet indicators/volumes are dust; real signals need real data.
     def klines(self, sym, tf, n=120):
-        return self._get('/fapi/v1/klines', {'symbol': sym, 'interval': tf, 'limit': n})
+        return self._get('/fapi/v1/klines', {'symbol': sym, 'interval': tf, 'limit': n},
+                         live_data=True)
 
     def price(self, sym) -> float:
+        # Execution-venue price (SL/TP triggers must match where orders fill)
         return float(self._get('/fapi/v1/ticker/price', {'symbol': sym})['price'])
 
     def tickers_24h(self):
-        return self._get('/fapi/v1/ticker/24hr')
+        return self._get('/fapi/v1/ticker/24hr', live_data=True)
 
     def exchange_info(self):
-        return self._get('/fapi/v1/exchangeInfo')
+        return self._get('/fapi/v1/exchangeInfo')   # execution venue (steps/filters)
 
     def open_interest_hist(self, sym, period='5m', n=3):
         try:
             return self._get('/futures/data/openInterestHist',
-                             {'symbol': sym, 'period': period, 'limit': n})
+                             {'symbol': sym, 'period': period, 'limit': n}, live_data=True)
         except: return []
 
     def long_short_ratio(self, sym, period='5m') -> float:
         try:
             d = self._get('/futures/data/globalLongShortAccountRatio',
-                          {'symbol': sym, 'period': period, 'limit': 1})
+                          {'symbol': sym, 'period': period, 'limit': 1}, live_data=True)
             return float(d[0]['longShortRatio']) if d else 1.0
         except: return 1.0
 
     def funding_history(self, sym, n=3):
         try:
-            return self._get('/fapi/v1/fundingRate', {'symbol': sym, 'limit': n})
+            return self._get('/fapi/v1/fundingRate', {'symbol': sym, 'limit': n},
+                             live_data=True)
         except: return []
 
     # ── Private endpoints ──
