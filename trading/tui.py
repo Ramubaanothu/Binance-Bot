@@ -46,7 +46,7 @@ if sys.platform == 'win32':
     except Exception:
         pass
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import msvcrt
@@ -283,7 +283,8 @@ def _header(S: dict) -> Panel:
     elif fng >= 60: fng_col, fng_lbl = 'yellow',         'GREED'
     else:           fng_col, fng_lbl = 'dim white',      'NEUTRAL'
 
-    ts = datetime.utcnow().strftime('%H:%M:%S UTC')
+    _now_utc = datetime.utcnow()
+    ts = (_now_utc + timedelta(hours=5, minutes=30)).strftime('%H:%M:%S IST')
     start_bal = S.get('start_bal', 0) or 0
     sess_pct  = ((bal / start_bal) - 1) * 100 if start_bal else 0.0
 
@@ -788,6 +789,10 @@ def _balance_chart(S: dict) -> Panel:
     now = time.time()
     if bal > 0:
         last_val = _balance_history[-1][1] if _balance_history else 0.0
+        # Balance source changed (e.g. paper $10k → real balance): old points are
+        # meaningless — clear so the chart doesn't show a fake cliff / session %
+        if last_val > 0 and abs(bal - last_val) / last_val > 0.20:
+            _balance_history.clear()
         if now - _bal_last_ts >= 30 or abs(bal - last_val) >= 0.05:
             _balance_history.append((now, bal))
             _bal_last_ts = now
@@ -852,14 +857,11 @@ def _balance_chart(S: dict) -> Panel:
             pt_col  = TEAL if sampled[col] >= start_val else PINK
             if y == chart_row:
                 body.append('─', style=pt_col)
-            elif col > 0:
-                y_prev = y_vals[col - 1]
-                lo_y   = min(y_prev, y)
-                hi_y   = max(y_prev, y)
-                if lo_y < chart_row < hi_y:
-                    body.append('│', style=pt_col)
-                else:
-                    body.append(' ')
+            elif col > 0 and min(y_vals[col - 1], y) < chart_row < max(y_vals[col - 1], y):
+                body.append('│', style=pt_col)
+            elif chart_row < y:
+                # area fill below the line — matches the HTML design's glow gradient
+                body.append('░', style='#073a30' if sampled[col] >= start_val else '#33081f')
             else:
                 body.append(' ')
         body.append('\n')

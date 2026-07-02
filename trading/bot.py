@@ -61,6 +61,22 @@ class Client:
         self.step: dict[str, float] = {}
         self._rate_ts   = 0.0
         self._rate_lock = threading.Lock()
+        self._time_offset = 0.0   # ms: Binance server time - local time
+        self._offset_ts   = 0.0
+        self.sync_time()
+
+    def sync_time(self):
+        """PC clocks drift — Binance rejects requests >1s off (-1021).
+        Measure the offset against the server and apply it to every timestamp."""
+        try:
+            t0 = time.time() * 1000
+            st = float(self._get('/fapi/v1/time')['serverTime'])
+            t1 = time.time() * 1000
+            self._time_offset = st - (t0 + t1) / 2
+            self._offset_ts   = time.time()
+            log.info(f"[TIME] clock offset vs Binance: {self._time_offset:+.0f}ms (auto-corrected)")
+        except Exception as e:
+            log.warning(f"[TIME] server time sync failed: {e}")
 
     def _throttle(self):
         with self._rate_lock:
@@ -71,7 +87,11 @@ class Client:
             time.sleep(gap)
 
     def _sign(self, p: dict) -> str:
-        p['timestamp'] = int(time.time() * 1000)
+        if time.time() - self._offset_ts > 1800:   # re-measure drift every 30 min
+            self._offset_ts = time.time()          # set first — avoids recursion loops
+            self.sync_time()
+        p['timestamp']  = int(time.time() * 1000 + self._time_offset)
+        p['recvWindow'] = 10000
         qs  = '&'.join(f"{k}={v}" for k, v in p.items())
         sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
         return qs + "&signature=" + sig
@@ -80,26 +100,31 @@ class Client:
         self._throttle()
         params = dict(params or {})
         if auth:
-            url = f"{BASE}{path}?{self._sign(params)}"
+            url = f"{BASE}{path}?{self._sign(dict(params))}"
         else:
             qs  = '&'.join(f"{k}={v}" for k, v in params.items())
             url = f"{BASE}{path}?{qs}" if qs else f"{BASE}{path}"
-        r = self.sess.get(url, timeout=12); r.raise_for_status(); return r.json()
+        r = self.sess.get(url, timeout=12)
+        if auth and r.status_code >= 400 and '-1021' in r.text:
+            self.sync_time()   # clock drifted — resync and retry once
+            r = self.sess.get(f"{BASE}{path}?{self._sign(dict(params))}", timeout=12)
+        r.raise_for_status(); return r.json()
 
-    def _post(self, path, params: dict):
-        url = f"{BASE}{path}?{self._sign(dict(params))}"
-        r   = self.sess.post(url, timeout=12)
+    def _send(self, method, path, params: dict):
+        r = getattr(self.sess, method)(f"{BASE}{path}?{self._sign(dict(params))}", timeout=12)
+        if r.status_code >= 400 and '-1021' in r.text:
+            self.sync_time()   # clock drifted — resync and retry once
+            r = getattr(self.sess, method)(f"{BASE}{path}?{self._sign(dict(params))}", timeout=12)
         if r.status_code >= 400:
             # Surface Binance's error code/msg (e.g. -1111 precision, -2019 margin)
             raise RuntimeError(f"{r.status_code} {path}: {r.text[:200]}")
         return r.json()
 
+    def _post(self, path, params: dict):
+        return self._send('post', path, params)
+
     def _delete(self, path, params: dict):
-        url = f"{BASE}{path}?{self._sign(dict(params))}"
-        r   = self.sess.delete(url, timeout=12)
-        if r.status_code >= 400:
-            raise RuntimeError(f"{r.status_code} {path}: {r.text[:200]}")
-        return r.json()
+        return self._send('delete', path, params)
 
     # ── Public endpoints ──
     def klines(self, sym, tf, n=120):
@@ -928,6 +953,23 @@ class AlphaBot:
             'sig':       sig,
         }
 
+    def dynamic_leverage(self, sym: str, atr_pct: float, conf: float) -> int:
+        """Volatility-adjusted leverage: calm coins earn more, wild coins get less.
+        atr_pct is the coin's own 5m ATR as % of price — its recent volatility."""
+        if sym in config.MAJOR_LEVERAGE:
+            # BTC/ETH/etc: deep liquidity, keep premium leverage but trim if unusually wild
+            base = config.MAJOR_LEVERAGE[sym]
+            if atr_pct > 1.0: base = max(10, base - 5)
+            return base
+        if   atr_pct <= 0.50: base = 12   # very calm — tight, predictable moves
+        elif atr_pct <= 0.90: base = 10   # normal
+        elif atr_pct <= 1.50: base = 7    # lively
+        elif atr_pct <= 2.50: base = 5    # volatile
+        else:                 base = 3    # wild meme-coin territory
+        if   conf >= 75: base += 2        # strong signal earns a little extra
+        elif conf <  60: base -= 1        # weak signal gets trimmed
+        return max(2, min(base, 15))
+
     def compute_exits(self, direction: str, entry: float, atr: float, sym: str = '') -> dict:
         sign   = +1 if direction == 'long' else -1
         is_maj = sym in config.MAJOR_LEVERAGE
@@ -993,7 +1035,7 @@ class AlphaBot:
 
         is_major   = sym in config.MAJOR_LEVERAGE
         is_priority= sym in config.PRIORITY_SYMBOLS
-        lev        = config.MAJOR_LEVERAGE.get(sym, config.LEVERAGE)
+        lev        = self.dynamic_leverage(sym, a['atr_pct'], a['confidence'])
         btc_rsi    = self._btc_rsi
         btc        = self._btc_trend
 
@@ -1200,7 +1242,7 @@ class AlphaBot:
         # so dashboard values match what the Binance app shows
         _exchange_pnl: dict[str, tuple[float, float]] = {}  # sym → (mark_price, unrealized_pnl)
         now = time.time()
-        if self.positions and now - self._last_risk_sync >= 30:
+        if self.positions and now - self._last_risk_sync >= 10:
             try:
                 loop = asyncio.get_event_loop()
                 risks = await loop.run_in_executor(None, self.client.position_risk)
@@ -1219,26 +1261,26 @@ class AlphaBot:
             pos = self.positions.get(sym)
             if pos is None: continue
             try:
-                # Use exchange mark price when available, fall back to last price
+                # Conventions (matching the Binance app):
+                #   pnl_usd = true dollars gained/lost  (notional × price move)
+                #   pnl_pct = ROI% on margin            (price move × leverage)
+                d        = pos['direction']
+                sign     = +1 if d == 'long' else -1
+                entry    = pos['entry']
+                lev_used = pos.get('leverage', config.LEVERAGE)
                 if sym in _exchange_pnl:
+                    # exchange mark price + exact unrealized P&L
                     current, ex_pnl_usd = _exchange_pnl[sym]
                     pos['current'] = current
                     pos['pnl_usd'] = round(ex_pnl_usd, 4)
-                    pos['pnl_pct'] = round(
-                        ex_pnl_usd / pos['size_usd'] * 100 if pos['size_usd'] else 0, 2
-                    )
+                    margin = pos['size_usd'] / lev_used if pos['size_usd'] else 0
+                    pos['pnl_pct'] = round(ex_pnl_usd / margin * 100 if margin else 0, 2)
                 else:
                     current = self.client.price(sym)
                     pos['current'] = current
-                d     = pos['direction']
-                sign  = +1 if d == 'long' else -1
-                entry = pos['entry']
-                if sym not in _exchange_pnl:
-                    lev_used = pos.get('leverage', config.LEVERAGE)
-                    pnl_pct  = sign * ((current / entry) - 1) * lev_used * 100
-                    pos['pnl_pct'] = round(pnl_pct, 2)
-                    pos['pnl_usd'] = round(pos['size_usd'] * pnl_pct / 100, 4)
-                current = pos['current']
+                    move_pct = sign * ((current / entry) - 1) * 100      # raw price move
+                    pos['pnl_pct'] = round(move_pct * lev_used, 2)       # ROI on margin
+                    pos['pnl_usd'] = round(pos['size_usd'] * move_pct / 100, 4)  # true $
                 pnl_pct = pos['pnl_pct']
 
                 lev_used = pos.get('leverage', config.LEVERAGE)
@@ -1321,12 +1363,19 @@ class AlphaBot:
 
     async def close(self, sym: str, pos: dict, pnl_pct: float, reason: str):
         d = pos['direction']
+        if time.time() < pos.get('_close_block_until', 0):
+            return   # recent close attempt failed — wait before retrying
         # Cancel exchange SL/TP orders before closing — prevents double-close
         self._cancel_exchange_guards(sym, pos)
         try:
             self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', pos['qty'], reduce=True)
         except Exception as e:
-            self.emit('warn', f"Close fail {sym}: {e}")
+            # CRITICAL: keep the position — deleting it here would leave an
+            # unmanaged orphan open on the exchange with no stop-loss
+            pos['_close_block_until'] = time.time() + 10
+            pos['phase'] = 'close-retry'
+            self.emit('warn', f"⚠ Close FAIL {sym} ({reason}): {e} — position KEPT, retrying in 10s")
+            return
 
         is_win  = pnl_pct > 0.01
         pnl_usd = pos['pnl_usd']

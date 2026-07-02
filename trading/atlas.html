@@ -198,11 +198,11 @@ try {
   balHist = saved.filter(p => p.t > cutoff);
 } catch(e) {}
 
-// ── Clock ─────────────────────────────────────────────────────────────────────
+// ── Clock (IST = UTC+5:30) ────────────────────────────────────────────────────
 setInterval(() => {
-  const d = new Date();
+  const d = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000);
   const p = n => String(n).padStart(2,'0');
-  $('sb-time').textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+  $('sb-time').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} IST`;
 }, 1000);
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
