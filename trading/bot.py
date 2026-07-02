@@ -49,6 +49,8 @@ logging.basicConfig(
 )
 log = logging.getLogger('AlphaBot')
 BASE = 'https://testnet.binancefuture.com'
+# Real-time push streams (mark prices + account events) — matches BASE environment
+WS_STREAM = 'wss://stream.binancefuture.com' if 'testnet' in BASE else 'wss://fstream.binance.com'
 
 
 # ─── REST Client ──────────────────────────────────────────────────────────────
@@ -219,6 +221,16 @@ class Client:
             try: detail = e.response.json()
             except: pass
             raise requests.HTTPError(f"{e} | detail={detail}", response=e.response)
+
+    def listen_key(self) -> str:
+        """User-data stream key — lets Binance push account/position events to us."""
+        r = self.sess.post(f"{BASE}/fapi/v1/listenKey", timeout=10)
+        r.raise_for_status()
+        return r.json()['listenKey']
+
+    def keepalive_listen_key(self):
+        try: self.sess.put(f"{BASE}/fapi/v1/listenKey", timeout=10)
+        except Exception: pass
 
     def cancel_order(self, sym, order_id):
         if config.PAPER_MODE or not order_id or str(order_id).startswith('PAPER'):
@@ -402,6 +414,8 @@ class AlphaBot:
         self.avg_loss     = 0.0
         self.scan_count   = 0
         self._last_risk_sync = 0.0   # unix ts of last positionRisk sync
+        self._mark_prices: dict[str, float] = {}   # real-time mark prices pushed by Binance
+        self._mark_stream_ts = 0.0                 # last mark-price push received
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -1276,7 +1290,13 @@ class AlphaBot:
                     margin = pos['size_usd'] / lev_used if pos['size_usd'] else 0
                     pos['pnl_pct'] = round(ex_pnl_usd / margin * 100 if margin else 0, 2)
                 else:
-                    current = self.client.price(sym)
+                    # Prefer the real-time pushed mark price (updates every second);
+                    # fall back to REST only if the stream is stale
+                    mark = self._mark_prices.get(sym, 0.0)
+                    if mark > 0 and time.time() - self._mark_stream_ts < 10:
+                        current = mark
+                    else:
+                        current = self.client.price(sym)
                     pos['current'] = current
                     move_pct = sign * ((current / entry) - 1) * 100      # raw price move
                     pos['pnl_pct'] = round(move_pct * lev_used, 2)       # ROI on margin
@@ -1674,6 +1694,75 @@ class AlphaBot:
             log.info("[SCAN CYCLE] Auto-recovering in 10s...")
             await asyncio.sleep(10)
 
+    # ── Real-time Binance streams (push, not poll) ────────────────────────────
+    async def _mark_price_stream(self):
+        """Binance pushes mark prices for ALL symbols every second — real-time P&L."""
+        url = WS_STREAM + '/ws/!markPrice@arr@1s'
+        while self.running:
+            try:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20,
+                                              max_size=2**23) as ws:
+                    log.info('[STREAM ] Mark-price stream connected — real-time prices ON')
+                    async for raw in ws:
+                        data = json.loads(raw)
+                        for it in data:
+                            self._mark_prices[it['s']] = float(it['p'])
+                        self._mark_stream_ts = time.time()
+            except Exception as e:
+                log.warning(f'[STREAM ] Mark-price stream lost: {e} — reconnect in 5s')
+                await asyncio.sleep(5)
+
+    async def _user_data_stream(self):
+        """Binance pushes account events the instant they happen:
+        balance changes, position P&L, order fills."""
+        if config.PAPER_MODE:
+            return
+        loop = asyncio.get_event_loop()
+        while self.running:
+            try:
+                key = await loop.run_in_executor(None, self.client.listen_key)
+                last_ka = time.time()
+                async with websockets.connect(f'{WS_STREAM}/ws/{key}',
+                                              ping_interval=20, ping_timeout=20) as ws:
+                    log.info('[STREAM ] User-data stream connected — real-time account sync ON')
+                    while self.running:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=60)
+                        except asyncio.TimeoutError:
+                            raw = None
+                        if raw:
+                            evt = json.loads(raw)
+                            et  = evt.get('e', '')
+                            if et == 'ACCOUNT_UPDATE':
+                                a = evt.get('a', {})
+                                for b in a.get('B', []):
+                                    if b.get('a') == 'USDT':
+                                        try: self.balance = float(b['wb'])
+                                        except Exception: pass
+                                for P in a.get('P', []):
+                                    sym = P.get('s', '')
+                                    pos = self.positions.get(sym)
+                                    if pos:
+                                        up = float(P.get('up', 0) or 0)
+                                        pos['pnl_usd'] = round(up, 4)
+                                        lev = pos.get('leverage', config.LEVERAGE)
+                                        margin = pos['size_usd'] / lev if pos['size_usd'] else 0
+                                        pos['pnl_pct'] = round(up / margin * 100 if margin else 0, 2)
+                                await self.push()   # instant dashboard refresh
+                            elif et == 'ORDER_TRADE_UPDATE':
+                                o = evt.get('o', {})
+                                if o.get('X') == 'FILLED':
+                                    log.info(f"[STREAM ] Fill: {o.get('s')} {o.get('S')} "
+                                             f"qty={o.get('q')} @ {o.get('ap')}")
+                            elif et == 'listenKeyExpired':
+                                break   # get a fresh key
+                        if time.time() - last_ka > 1500:   # keepalive every 25 min
+                            await loop.run_in_executor(None, self.client.keepalive_listen_key)
+                            last_ka = time.time()
+            except Exception as e:
+                log.warning(f'[STREAM ] User-data stream lost: {e} — reconnect in 10s')
+                await asyncio.sleep(10)
+
     async def ws_handler(self, ws):
         self.ws_clients.add(ws)
         self.emit('info', f"📊 Dashboard connected ({len(self.ws_clients)} clients)")
@@ -1691,6 +1780,9 @@ class AlphaBot:
         asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
 
         server = await websockets.serve(self.ws_handler, config.WS_HOST, config.WS_PORT)
+        # Real-time push streams from Binance (auto-reconnect, REST stays as fallback)
+        asyncio.get_event_loop().create_task(self._mark_price_stream())
+        asyncio.get_event_loop().create_task(self._user_data_stream())
         sep = '=' * 70
         dash= '-' * 70
         print(sep)
