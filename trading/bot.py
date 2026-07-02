@@ -1798,6 +1798,38 @@ class AlphaBot:
                 log.error(f"[LIVE] {e}")
             await asyncio.sleep(1)
 
+    async def _verify_external_close(self, sym: str):
+        """A stream event claimed this position is closed. Verify against REST
+        (source of truth) before booking — never abandon a live position."""
+        pos = self.positions.get(sym)
+        if pos is None or pos.get('_closing') or pos.get('_ext_verifying'):
+            return
+        pos['_ext_verifying'] = True
+        try:
+            await asyncio.sleep(2)   # let the exchange settle
+            pos = self.positions.get(sym)
+            if pos is None or pos.get('_closing'):
+                return
+            loop  = asyncio.get_event_loop()
+            risks = await loop.run_in_executor(None, self.client.position_risk)
+            amt   = 0.0
+            for r in risks:
+                if r.get('symbol') == sym:
+                    amt = float(r.get('positionAmt', 0) or 0)
+                    break
+            if abs(amt) < 1e-12:
+                self.emit('warn', f"📱 {sym} confirmed closed on exchange — booking")
+                await self.close(sym, pos, pos.get('pnl_pct', 0.0),
+                                 'CLOSED ON EXCHANGE', external=True)
+            else:
+                log.info(f"[STREAM ] {sym} close event was a stale snapshot — position alive, ignored")
+        except Exception as e:
+            log.debug(f"verify external close {sym}: {e}")
+        finally:
+            p = self.positions.get(sym)
+            if p is not None:
+                p.pop('_ext_verifying', None)
+
     # ── Real-time Binance streams (push, not poll) ────────────────────────────
     async def _mark_price_stream(self):
         """Binance pushes mark prices for ALL symbols every second — real-time P&L."""
@@ -1849,13 +1881,11 @@ class AlphaBot:
                                     if pos:
                                         amt = float(P.get('pa', 0) or 0)
                                         if abs(amt) < 1e-12 and not pos.get('_closing'):
-                                            # Position closed on the exchange (e.g. in
-                                            # the Binance app) — book it instantly
-                                            self.emit('warn',
-                                                f"📱 {sym} closed on exchange (app/manual) — booking now")
+                                            # Stream claims position is gone — testnet sends
+                                            # stale/out-of-order snapshots, so VERIFY via
+                                            # REST before booking anything
                                             asyncio.get_event_loop().create_task(
-                                                self.close(sym, pos, pos.get('pnl_pct', 0.0),
-                                                           'CLOSED IN APP', external=True))
+                                                self._verify_external_close(sym))
                                             continue
                                         up = float(P.get('up', 0) or 0)
                                         pos['pnl_usd'] = round(up, 4)
