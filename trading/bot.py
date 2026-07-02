@@ -1150,6 +1150,17 @@ class AlphaBot:
             if conf < need:
                 self.emit('fail', f"{sym} Daily BULL SHORT needs {need:.0f}%+ got {conf:.0f}% → SKIP"); return
 
+        # ── BTC overbought gate — don't chase LONGs into a stretched bounce.
+        #    Trade data 2026-07-02: 9 consecutive long stop-outs entered at BTC
+        #    RSI 71-79; the RSI-79 pullback swept them all at once.
+        if direction == 'long' and not btc_extreme_oversold:
+            if btc_rsi >= 78:
+                self.emit('fail', f"{sym} BTC RSI={btc_rsi:.0f} euphoric → no LONG chase → SKIP"); return
+            if btc_rsi >= 72:
+                need = min_conf + 8
+                if conf < need:
+                    self.emit('fail', f"{sym} BTC RSI={btc_rsi:.0f} overbought → LONG needs {need:.0f}%+ got {conf:.0f}% → SKIP"); return
+
         # ── BTC 10m momentum gate — don't open altcoin entries against BTC flow
         if not is_major and abs(self._btc_5m_mom) > 0.40:
             if direction == 'long' and self._btc_5m_mom < -0.40:
