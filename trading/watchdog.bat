@@ -20,5 +20,6 @@ echo.
 echo  [%DATE% %TIME%] Bot exited (code %EXIT_CODE%). Restarting in 10s...
 echo  [WATCHDOG] Close this window or press Ctrl+C to stop restarts.
 echo.
-timeout /t 10 /nobreak > nul
+rem ping = console-independent sleep (timeout can hang in hidden windows)
+ping -n 11 127.0.0.1 > nul
 goto restart

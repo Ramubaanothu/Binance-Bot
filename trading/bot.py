@@ -427,6 +427,7 @@ class AlphaBot:
         self._retry_busy = False                   # re-entry guard for blocked-signal retry
         self._vol24: dict[str, float] = {}         # sym → 24h quote volume (liquidity tiering)
         self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
+        self._recently_closed: dict[str, float] = {}   # sym → close ts (reconcile ghost guard)
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -588,8 +589,13 @@ class AlphaBot:
                 await asyncio.sleep(0.3)
                 self._place_exchange_guards(sym, pos)
 
-            # 3. Evaluate orphan exchange positions (positions bot doesn't know about)
-            orphans = [s for s in ex_map if s not in self.positions]
+            # 3. Evaluate orphan exchange positions (positions bot doesn't know about).
+            #    Skip symbols we closed in the last 3 min — the exchange snapshot can
+            #    lag a just-executed close and resurrect a ghost position.
+            _now = time.time()
+            orphans = [s for s in ex_map
+                       if s not in self.positions
+                       and _now - self._recently_closed.get(s, 0) > 180]
             imported_n = 0
             closed_n   = 0
 
@@ -1480,13 +1486,18 @@ class AlphaBot:
             try:
                 self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', pos['qty'], reduce=True)
             except Exception as e:
-                # CRITICAL: keep the position — deleting it here would leave an
-                # unmanaged orphan open on the exchange with no stop-loss
-                pos['_closing'] = False
-                pos['_close_block_until'] = time.time() + 10
-                pos['phase'] = 'close-retry'
-                self.emit('warn', f"⚠ Close FAIL {sym} ({reason}): {e} — position KEPT, retrying in 10s")
-                return
+                if '-2022' in str(e):
+                    # ReduceOnly rejected = nothing to reduce → position doesn't
+                    # exist on the exchange (ghost) — book it out, don't keep it
+                    reason = f'{reason} (GHOST)'
+                else:
+                    # CRITICAL: keep the position — deleting it here would leave an
+                    # unmanaged orphan open on the exchange with no stop-loss
+                    pos['_closing'] = False
+                    pos['_close_block_until'] = time.time() + 10
+                    pos['phase'] = 'close-retry'
+                    self.emit('warn', f"⚠ Close FAIL {sym} ({reason}): {e} — position KEPT, retrying in 10s")
+                    return
 
         # Funding fees paid/received while the position was open — part of true cost
         funding = 0.0
@@ -1543,6 +1554,7 @@ class AlphaBot:
         self._save_trades()
         del self.positions[sym]
         self._save_positions()
+        self._recently_closed[sym] = time.time()   # reconcile ghost guard
         # A slot just freed — give queued (slot-blocked) signals a fresh shot
         if self._blocked_signals:
             asyncio.get_event_loop().create_task(self._retry_blocked())
