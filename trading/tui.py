@@ -804,6 +804,7 @@ def _stats(S: dict) -> Panel:
     dd_col  = 'bright_green' if dd < 5 else ('yellow' if dd < 10 else 'bright_red')
 
     t = Text()
+    t.append_text(metric('Risk/trade', f"${S.get('risk_per_trade', 0):.2f} (0.4%)", CYAN2))
     t.append_text(metric('ProfitFac', f'{pf:.2f}',              pf_col))
     t.append_text(metric('Expectancy',f'${expect:+.2f}/trade',  ex_col))
     t.append_text(metric('WinRate',   f'{wr:.0f}% ({wins}W/{losses}L)', wr_col))
@@ -955,7 +956,7 @@ def _build(S: dict, frame: int) -> Layout:
     )
     layout['body']['right_col'].split_column(
         Layout(name='gauges', size=5),
-        Layout(name='stats',  size=11),     # trade analytics — profit factor, expectancy
+        Layout(name='stats',  size=12),     # trade analytics — risk, profit factor, expectancy
         Layout(name='market', ratio=1),     # market fills remaining space
     )
     layout['header'].update(_header(S))

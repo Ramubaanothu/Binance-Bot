@@ -780,6 +780,7 @@ class AlphaBot:
             'perf':         self.perf.summary(),
             'avg_win':      round(self.avg_win, 4),
             'avg_loss':     round(self.avg_loss, 4),
+            'risk_per_trade': round(self.balance * config.RISK_PER_TRADE_PCT / 100, 2),
             'paper_mode':      config.PAPER_MODE,
             'btc_trend':       self._btc_trend,
             'btc_4h_trend':    self._btc_4h_trend,
@@ -1246,27 +1247,41 @@ class AlphaBot:
         if rr_ratio < config.MIN_RR_RATIO:
             self.emit('fail', f"{sym} R:R={rr_ratio:.2f}x < {config.MIN_RR_RATIO}x minimum → SKIP"); return
 
-        # ── Position sizing: Kelly + confidence-scaled ───────────────────────
-        tot = self.wins + self.losses
-        pct = kelly_size(
+        # ── Position sizing — PRO MODEL: risk-based, not notional-based.
+        # Fixed % of equity is at stake per trade; position size derives from the
+        # SL distance, so wide-stop (volatile) coins automatically size smaller.
+        # Scales from a $100 account to any size.
+        tot      = self.wins + self.losses
+        risk_pct = kelly_size(
             win_rate = self.wins / tot if tot > 10 else 0.5,
             avg_win  = self.avg_win,
             avg_loss = abs(self.avg_loss),
-            base_pct = config.POSITION_SIZE_PCT,
+            base_pct = config.RISK_PER_TRADE_PCT / 100,
             atr_pct  = a['atr_pct'],
         )
-        # Confidence-based size multiplier — bet bigger on high-conviction signals
-        if conf >= 68:   pct *= 1.5   # very high conviction → 150%
-        elif conf >= 60: pct *= 1.2   # high conviction → 120%
-        elif conf < 54:  pct *= 0.75  # marginal → 75% size
-        if is_major:
-            pct = min(pct * 1.25, 0.10)
-        else:
-            pct = min(pct, 0.06)      # cap altcoin exposure at 6%
+        risk_pct = min(risk_pct, config.RISK_PER_TRADE_PCT * 2.5 / 100)  # Kelly hard cap
+        # Conviction scaling — risk more on stronger signals
+        if conf >= 68:   risk_pct *= 1.5
+        elif conf >= 60: risk_pct *= 1.2
+        elif conf < 54:  risk_pct *= 0.75
+        if is_major:     risk_pct *= 1.25   # cleaner fills, deeper books
 
-        price   = a['price']
-        raw_qty = (self.balance * pct) / price
+        price    = a['price']
+        sl_pct   = sl_dist / price if price else 0.01     # stop distance fraction
+        risk_usd = self.balance * risk_pct
+        notional = risk_usd / max(sl_pct, 1e-6)
+        # margin cap: one trade may never use more than 20% of equity as margin
+        notional = min(notional, self.balance * lev * 0.20)
+        if notional < config.MIN_NOTIONAL_USDT:
+            notional = config.MIN_NOTIONAL_USDT           # exchange minimum
+            if notional / lev > self.balance * 0.20:
+                self.emit('fail', f"{sym} balance too small for exchange min order → SKIP"); return
+
+        raw_qty = notional / price
         qty     = self.client.round_qty(sym, raw_qty)
+        if qty > 0 and qty * price < config.MIN_NOTIONAL_USDT * 0.98:
+            # step rounding dropped below exchange minimum — bump one step
+            qty = self.client.round_qty(sym, raw_qty + self.client.step.get(sym, 0.001))
         if qty <= 0:
             self.emit('warn', f"{sym} qty=0 bal=${self.balance:.2f}"); return
 
@@ -1289,6 +1304,7 @@ class AlphaBot:
             'direction': direction,
             'entry':     entry,
             'current':   entry,
+            'peak':      entry,   # best price reached — drives the profit ratchet
             'qty':       qty,
             'size_usd':  round(qty * entry, 4),
             'leverage':  lev,
@@ -1424,11 +1440,23 @@ class AlphaBot:
                     pos['trail_dist'] *= 0.5
                     self.emit('info', f"🎯 TP2 {sym} → tight trail to TP3={pos['tp3']:.5g}")
 
-                # Update trailing stop
+                # ── Profit ratchet — track the PEAK price and defend it.
+                # (Old trail keyed off the live price: a spike-and-dump between
+                # ticks never ratcheted, letting +40% ROI decay to a BE exit.)
+                if sign > 0: pos['peak'] = max(pos.get('peak', entry), current)
+                else:        pos['peak'] = min(pos.get('peak', entry), current)
                 if pos['tp1_hit'] or pos['be_locked']:
-                    new_sl = current - sign * pos['trail_dist']
+                    peak      = pos.get('peak', entry)
+                    peak_gain = sign * (peak / entry - 1)     # price move at peak
+                    # ATR trail measured from the peak (wicks count)
+                    new_sl = peak - sign * pos['trail_dist']
                     if sign * (new_sl - pos['trail_sl']) > 0:
                         pos['trail_sl'] = round(new_sl, 8)
+                    # retention floor: keep at least 40% of the peak gain
+                    if peak_gain > 0.006:
+                        floor = entry * (1 + sign * peak_gain * 0.40)
+                        if sign * (floor - pos['trail_sl']) > 0:
+                            pos['trail_sl'] = round(floor, 8)
 
                 # Exit triggers
                 sl_hit  = sign * (pos['trail_sl'] - current) >= 0
