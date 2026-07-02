@@ -417,6 +417,8 @@ class AlphaBot:
         self._mark_prices: dict[str, float] = {}   # real-time mark prices pushed by Binance
         self._mark_stream_ts = 0.0                 # last mark-price push received
         self._upd_busy = False                     # re-entry guard for live update loop
+        self._blocked_signals: dict[str, float] = {}  # sym → ts: passed gates but no slot free
+        self._retry_busy = False                   # re-entry guard for blocked-signal retry
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -1012,6 +1014,47 @@ class AlphaBot:
             'trail_dist': trl_d,
         }
 
+    def _queue_blocked(self, sym: str):
+        """Remember a fully-passed signal that only lacked a free slot (max 10, 30-min expiry)."""
+        now = time.time()
+        self._blocked_signals[sym] = now
+        for s, ts in list(self._blocked_signals.items()):
+            if now - ts > 1800:
+                del self._blocked_signals[s]
+        while len(self._blocked_signals) > 10:
+            oldest = min(self._blocked_signals, key=self._blocked_signals.get)
+            del self._blocked_signals[oldest]
+
+    async def _retry_blocked(self):
+        """A slot just freed: re-analyse the blocked queue FRESH, rank by current
+        confidence, and try the best first. Stale scores are never executed."""
+        if self._retry_busy: return
+        self._retry_busy = True
+        try:
+            now  = time.time()
+            syms = [s for s, ts in self._blocked_signals.items()
+                    if now - ts <= 1800 and s not in self.positions]
+            self._blocked_signals.clear()   # failures don't get a second chance
+            if not syms or len(self.positions) >= config.MAX_POSITIONS:
+                return
+            loop    = asyncio.get_event_loop()
+            futs    = [loop.run_in_executor(None, self.analyse_symbol, s, 0.0) for s in syms]
+            results = await asyncio.gather(*futs, return_exceptions=True)
+            min_c   = session_min_conf()
+            fresh   = [a for a in results
+                       if isinstance(a, dict) and a.get('confidence', 0) >= min_c]
+            fresh.sort(key=lambda a: (a['confidence'], a.get('vol_ratio', 0)), reverse=True)
+            for a in fresh:
+                if len(self.positions) >= config.MAX_POSITIONS: break
+                if a['symbol'] in self.positions: continue
+                self.emit('info',
+                    f"⚡ Slot freed → {a['symbol']} revalidated at {a['confidence']:.0f}% — trying entry")
+                await self.open_position(a)
+        except Exception as e:
+            log.error(f"[RETRY_BLOCKED] {e}")
+        finally:
+            self._retry_busy = False
+
     async def open_position(self, a: dict):
         sym = a['symbol']
         if sym in self.positions: return
@@ -1025,7 +1068,8 @@ class AlphaBot:
             at_risk = [s for s, p in self.positions.items()
                        if not p.get('tp1_hit') and not p.get('be_locked')]
             if not at_risk:
-                return   # book is fully protected winners — let them run
+                self._queue_blocked(sym)   # book is fully protected winners — let them run
+                return
             weakest_sym  = min(at_risk, key=lambda s: self.positions[s]['conf'])
             weakest_conf = self.positions[weakest_sym]['conf']
             if a['confidence'] > weakest_conf + 10:
@@ -1040,7 +1084,8 @@ class AlphaBot:
                 wpnl = sign * ((cur / wp['entry']) - 1) * wp.get('leverage', config.LEVERAGE) * 100
                 await self.close(weakest_sym, wp, wpnl, f'SWAPPED → {sym}')
             else:
-                return  # new signal not strong enough to displace weakest
+                self._queue_blocked(sym)   # good signal, no room — retry when a slot frees
+                return
 
         direction = a['direction']
         min_conf  = session_min_conf()
@@ -1450,6 +1495,9 @@ class AlphaBot:
         self._save_trades()
         del self.positions[sym]
         self._save_positions()
+        # A slot just freed — give queued (slot-blocked) signals a fresh shot
+        if self._blocked_signals:
+            asyncio.get_event_loop().create_task(self._retry_blocked())
 
         self.balance  = self.client.usdt_balance(self.paper_balance)
         self.peak_bal = max(self.peak_bal, self.balance)
