@@ -2,6 +2,7 @@
 title AlphaBot Watchdog
 color 0A
 chcp 65001 > nul
+cd /d "%~dp0"
 
 :restart
 echo.

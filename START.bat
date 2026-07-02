@@ -31,7 +31,10 @@ pip install rich "websockets>=12.0,<14.0" requests pandas numpy -q
 echo  Done.
 echo.
 
-echo  [2/3] Freeing port 8765...
+echo  [2/3] Stopping any previous bot instances...
+echo . > "%~dp0trading\STOP_BOT"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'bot\.py|watchdog\.bat' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+del "%~dp0trading\STOP_BOT" >nul 2>&1
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8765 " ^| findstr "LISTENING"') do (
     taskkill /F /PID %%a >nul 2>&1
 )
@@ -39,8 +42,8 @@ timeout /t 1 /nobreak > nul
 echo  Done.
 echo.
 
-echo  [3/3] Starting bot engine with auto-restart watchdog...
-start "AlphaBot v5.0 Engine" /min cmd /c watchdog.bat
+echo  [3/3] Starting bot engine (hidden, auto-restart watchdog)...
+wscript.exe "%~dp0trading\run_hidden.vbs" "%~dp0trading\watchdog.bat"
 echo  Waiting for bot to initialise (8 seconds)...
 timeout /t 8 /nobreak > nul
 
@@ -69,11 +72,9 @@ echo.
 set /p STOP=Stop bot engine? [Y/N]:
 if /i "%STOP%"=="Y" (
     echo . > "%~dp0trading\STOP_BOT"
+    powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'bot\.py' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
     timeout /t 2 /nobreak > nul
-    taskkill /F /FI "WINDOWTITLE eq AlphaBot v5.0 Engine" >nul 2>&1
-    for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8765 " ^| findstr "LISTENING"') do (
-        taskkill /F /PID %%a >nul 2>&1
-    )
+    del "%~dp0trading\STOP_BOT" >nul 2>&1
     echo  Bot stopped.
 )
 echo.
