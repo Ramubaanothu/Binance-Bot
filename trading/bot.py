@@ -222,6 +222,12 @@ class Client:
             except: pass
             raise requests.HTTPError(f"{e} | detail={detail}", response=e.response)
 
+    def income(self, sym: str, income_type: str = 'FUNDING_FEE', start_ms: int = 0):
+        """Income history (funding fees, commissions) for a symbol since start_ms."""
+        p = {'symbol': sym, 'incomeType': income_type, 'limit': 100}
+        if start_ms > 0: p['startTime'] = start_ms
+        return self._get('/fapi/v1/income', p, auth=True)
+
     def listen_key(self) -> str:
         """User-data stream key — lets Binance push account/position events to us."""
         r = self.sess.post(f"{BASE}/fapi/v1/listenKey", timeout=10)
@@ -1280,6 +1286,7 @@ class AlphaBot:
             'oi_bias':   a['oi_bias'],
             'pivot':     a['pivot'],
             'open_time': datetime.now().strftime('%H:%M:%S'),
+            'open_ms':   int(time.time() * 1000),   # for funding-fee lookup at close
             'session':   current_session(),
             'vol_ratio': a.get('vol_ratio', 1.0),
             'rr_ratio':  round(rr_ratio, 2),
@@ -1434,24 +1441,37 @@ class AlphaBot:
             f"💰 TP1 BANKED {sym}: {frac*100:.0f}% closed @ {price:.6g} → "
             f"{pnl_usd:+.4f}$ | runner qty={pos['qty']} → TP2={pos['tp2']:.5g}")
 
-    async def close(self, sym: str, pos: dict, pnl_pct: float, reason: str):
+    async def close(self, sym: str, pos: dict, pnl_pct: float, reason: str,
+                    external: bool = False):
         d = pos['direction']
         if time.time() < pos.get('_close_block_until', 0):
             return   # recent close attempt failed — wait before retrying
         # Cancel exchange SL/TP orders before closing — prevents double-close
         self._cancel_exchange_guards(sym, pos)
-        try:
-            self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', pos['qty'], reduce=True)
-        except Exception as e:
-            # CRITICAL: keep the position — deleting it here would leave an
-            # unmanaged orphan open on the exchange with no stop-loss
-            pos['_close_block_until'] = time.time() + 10
-            pos['phase'] = 'close-retry'
-            self.emit('warn', f"⚠ Close FAIL {sym} ({reason}): {e} — position KEPT, retrying in 10s")
-            return
+        if not external:   # external = already closed on exchange (e.g. in the app)
+            pos['_closing'] = True   # guard: stream handler must not double-book
+            try:
+                self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', pos['qty'], reduce=True)
+            except Exception as e:
+                # CRITICAL: keep the position — deleting it here would leave an
+                # unmanaged orphan open on the exchange with no stop-loss
+                pos['_closing'] = False
+                pos['_close_block_until'] = time.time() + 10
+                pos['phase'] = 'close-retry'
+                self.emit('warn', f"⚠ Close FAIL {sym} ({reason}): {e} — position KEPT, retrying in 10s")
+                return
+
+        # Funding fees paid/received while the position was open — part of true cost
+        funding = 0.0
+        if not config.PAPER_MODE and pos.get('open_ms', 0) > 0:
+            try:
+                inc = self.client.income(sym, 'FUNDING_FEE', pos['open_ms'])
+                funding = sum(float(i.get('income', 0) or 0) for i in inc)
+            except Exception as _fe:
+                log.debug(f"funding fetch {sym}: {_fe}")
 
         is_win  = pnl_pct > 0.01
-        pnl_usd = pos['pnl_usd']
+        pnl_usd = pos['pnl_usd'] + funding
 
         if is_win:
             self.wins  += 1
@@ -1489,6 +1509,7 @@ class AlphaBot:
             'open_time':  pos['open_time'],
             'close_time': datetime.now().strftime('%H:%M:%S'),
             'is_win':     is_win,
+            'funding':    round(funding, 4),
             'sharpe_now': round(self.perf.sharpe, 2),
         }
         self.trades.append(t)
@@ -1502,9 +1523,10 @@ class AlphaBot:
         self.balance  = self.client.usdt_balance(self.paper_balance)
         self.peak_bal = max(self.peak_bal, self.balance)
 
+        _fund_txt = f" | funding {funding:+.4f}$" if abs(funding) > 1e-6 else ''
         self.emit('exit',
             f"{'✅' if is_win else '❌'} #{t['id']} {sym} {reason} | "
-            f"{d.upper()} {'+' if is_win else ''}{pnl_pct:.2f}% (${pnl_usd:.4f}) | "
+            f"{d.upper()} {'+' if is_win else ''}{pnl_pct:.2f}% (${pnl_usd:.4f}){_fund_txt} | "
             f"Bal ${self.balance:.4f} | Sharpe={self.perf.sharpe:.2f} | Streak={self.perf.win_streak}W/{self.perf.loss_streak}L"
         )
 
@@ -1812,6 +1834,16 @@ class AlphaBot:
                                     sym = P.get('s', '')
                                     pos = self.positions.get(sym)
                                     if pos:
+                                        amt = float(P.get('pa', 0) or 0)
+                                        if abs(amt) < 1e-12 and not pos.get('_closing'):
+                                            # Position closed on the exchange (e.g. in
+                                            # the Binance app) — book it instantly
+                                            self.emit('warn',
+                                                f"📱 {sym} closed on exchange (app/manual) — booking now")
+                                            asyncio.get_event_loop().create_task(
+                                                self.close(sym, pos, pos.get('pnl_pct', 0.0),
+                                                           'CLOSED IN APP', external=True))
+                                            continue
                                         up = float(P.get('up', 0) or 0)
                                         pos['pnl_usd'] = round(up, 4)
                                         lev = pos.get('leverage', config.LEVERAGE)
@@ -1823,6 +1855,25 @@ class AlphaBot:
                                 if o.get('X') == 'FILLED':
                                     log.info(f"[STREAM ] Fill: {o.get('s')} {o.get('S')} "
                                              f"qty={o.get('q')} @ {o.get('ap')}")
+                                    # Correct our entry to the ACTUAL average fill price
+                                    # (slippage means it differs from the signal price)
+                                    sym = o.get('s', '')
+                                    pos = self.positions.get(sym)
+                                    ap  = float(o.get('ap', 0) or 0)
+                                    if (pos and ap > 0 and not o.get('R')     # entry, not reduce
+                                            and not pos.get('tp1_hit') and not pos.get('be_locked')
+                                            and time.time()*1000 - pos.get('open_ms', 0) < 60_000
+                                            and abs(ap - pos['entry']) / pos['entry'] > 0.0003):
+                                        old = pos['entry']
+                                        pos['entry']    = ap
+                                        pos['size_usd'] = round(pos['qty'] * ap, 4)
+                                        ex = self.compute_exits(pos['direction'], ap, pos['atr'], sym)
+                                        pos.update({'sl': ex['sl'], 'tp1': ex['tp1'],
+                                                    'tp2': ex['tp2'], 'tp3': ex['tp3'],
+                                                    'trail_sl': ex['sl']})
+                                        self._save_positions()
+                                        log.info(f"[STREAM ] {sym} entry corrected "
+                                                 f"{old:.6g} → {ap:.6g} (actual fill), exits recomputed")
                             elif et == 'listenKeyExpired':
                                 break   # get a fresh key
                         if time.time() - last_ka > 1500:   # keepalive every 25 min
