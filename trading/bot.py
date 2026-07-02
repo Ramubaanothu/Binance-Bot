@@ -1923,7 +1923,7 @@ class AlphaBot:
         url = WS_STREAM + '/ws/!markPrice@arr@1s'
         while self.running:
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20,
+                async with websockets.connect(url, ping_interval=30, ping_timeout=60,
                                               max_size=2**23) as ws:
                     log.info('[STREAM ] Mark-price stream connected — real-time prices ON')
                     async for raw in ws:
@@ -1946,7 +1946,7 @@ class AlphaBot:
                 key = await loop.run_in_executor(None, self.client.listen_key)
                 last_ka = time.time()
                 async with websockets.connect(f'{WS_STREAM}/ws/{key}',
-                                              ping_interval=20, ping_timeout=20) as ws:
+                                              ping_interval=30, ping_timeout=60) as ws:
                     log.info('[STREAM ] User-data stream connected — real-time account sync ON')
                     while self.running:
                         try:
