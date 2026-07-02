@@ -1653,6 +1653,14 @@ class AlphaBot:
                             f"patterns=[{pats}] | OI={a['oi_bias']:+.0f}"
                         )
                         candidates.append(a)
+                        # Execute IMMEDIATELY while the signal is fresh — waiting
+                        # for scan end (minutes) made entries stale and meant an
+                        # interrupted scan never opened anything
+                        if len(self.positions) < config.MAX_POSITIONS and sym not in self.positions:
+                            try:
+                                await self.open_position(a)
+                            except Exception as _open_err:
+                                log.error(f"[OPEN] {sym}: {_open_err}")
                 else:
                     self.emit('fail', f"{sym} {a['confidence']:.0f}% {a['direction'].upper()} | regime={a['regime']} | ADX={a['adx']:.0f} RSI={a['rsi']} → below {min_conf:.0f}%")
 
