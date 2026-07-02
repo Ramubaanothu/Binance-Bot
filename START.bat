@@ -39,8 +39,8 @@ timeout /t 1 /nobreak > nul
 echo  Done.
 echo.
 
-echo  [3/3] Starting bot engine (independent process - survives after this window closes)...
-start "AlphaBot v5.0 Engine" /min python bot.py
+echo  [3/3] Starting bot engine with auto-restart watchdog...
+start "AlphaBot v5.0 Engine" /min cmd /c watchdog.bat
 echo  Waiting for bot to initialise (8 seconds)...
 timeout /t 8 /nobreak > nul
 
@@ -68,6 +68,8 @@ echo  ============================================================
 echo.
 set /p STOP=Stop bot engine? [Y/N]:
 if /i "%STOP%"=="Y" (
+    echo . > "%~dp0trading\STOP_BOT"
+    timeout /t 2 /nobreak > nul
     taskkill /F /FI "WINDOWTITLE eq AlphaBot v5.0 Engine" >nul 2>&1
     for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8765 " ^| findstr "LISTENING"') do (
         taskkill /F /PID %%a >nul 2>&1

@@ -594,10 +594,14 @@ class TAEngine:
             patterns = cls.detect_patterns(dfs['5m'])
             sr       = cls.find_sr(dfs['15m'])
 
-            # Pattern bonus/penalty
+            # Pattern bonus/penalty — sign-aware: confirming patterns push the score
+            # away from zero, contradicting patterns pull it toward zero
+            sgn = 1 if direction == 'long' else -1
             for p in patterns:
-                if p['dir'] == direction:       final = min(100, final + p['strength'] * 0.10)
-                elif p['dir'] != 'neutral':     final = max(-100, final - p['strength'] * 0.05)
+                if p['dir'] == direction:
+                    final = max(-100, min(100, final + sgn * p['strength'] * 0.10))
+                elif p['dir'] != 'neutral':
+                    final = max(-100, min(100, final - sgn * p['strength'] * 0.05))
 
             # Ichimoku cloud state
             spanA = float(row5.get('spanA', 0)); spanB = float(row5.get('spanB', 0))

@@ -25,6 +25,7 @@ import hmac
 import hashlib
 import logging
 import math
+import threading
 from pathlib import Path
 from datetime import datetime, date
 from collections import deque, defaultdict
@@ -58,13 +59,16 @@ class Client:
         self.sess   = requests.Session()
         self.sess.headers['X-MBX-APIKEY'] = self.key
         self.step: dict[str, float] = {}
-        self._rate_ts = 0.0
+        self._rate_ts   = 0.0
+        self._rate_lock = threading.Lock()
 
     def _throttle(self):
-        now = time.time()
-        gap = config.RATE_LIMIT_DELAY - (now - self._rate_ts)
-        if gap > 0: time.sleep(gap)
-        self._rate_ts = time.time()
+        with self._rate_lock:
+            now = time.time()
+            gap = config.RATE_LIMIT_DELAY - (now - self._rate_ts)
+            self._rate_ts = time.time() + max(0.0, gap)
+        if gap > 0:
+            time.sleep(gap)
 
     def _sign(self, p: dict) -> str:
         p['timestamp'] = int(time.time() * 1000)
@@ -84,11 +88,18 @@ class Client:
 
     def _post(self, path, params: dict):
         url = f"{BASE}{path}?{self._sign(dict(params))}"
-        r   = self.sess.post(url, timeout=12); r.raise_for_status(); return r.json()
+        r   = self.sess.post(url, timeout=12)
+        if r.status_code >= 400:
+            # Surface Binance's error code/msg (e.g. -1111 precision, -2019 margin)
+            raise RuntimeError(f"{r.status_code} {path}: {r.text[:200]}")
+        return r.json()
 
     def _delete(self, path, params: dict):
         url = f"{BASE}{path}?{self._sign(dict(params))}"
-        r   = self.sess.delete(url, timeout=12); r.raise_for_status(); return r.json()
+        r   = self.sess.delete(url, timeout=12)
+        if r.status_code >= 400:
+            raise RuntimeError(f"{r.status_code} {path}: {r.text[:200]}")
+        return r.json()
 
     # ── Public endpoints ──
     def klines(self, sym, tf, n=120):
@@ -132,10 +143,15 @@ class Client:
         try: self._post('/fapi/v1/marginType', {'symbol': sym, 'marginType': 'ISOLATED'})
         except: pass
 
+    @staticmethod
+    def _fmt_qty(qty) -> str:
+        """326.0 → '326', 0.0010 → '0.001' — Binance rejects trailing zeros beyond stepSize."""
+        return f'{float(qty):.8f}'.rstrip('0').rstrip('.')
+
     def market_order(self, sym, side, qty, reduce=False, current_price=0.0):
         if config.PAPER_MODE:
             return {'orderId': f'PAPER-{int(time.time()*1000)}', 'avgPrice': str(current_price), 'status': 'FILLED'}
-        p = {'symbol': sym, 'side': side, 'type': 'MARKET', 'quantity': qty}
+        p = {'symbol': sym, 'side': side, 'type': 'MARKET', 'quantity': self._fmt_qty(qty)}
         if reduce: p['reduceOnly'] = 'true'
         return self._post('/fapi/v1/order', p)
 
@@ -146,7 +162,7 @@ class Client:
         p = {
             'symbol':      sym, 'side': side,
             'type':        'STOP_MARKET',
-            'quantity':    qty,
+            'quantity':    self._fmt_qty(qty),
             'stopPrice':   f"{stop_price:.8f}".rstrip('0').rstrip('.'),
             'closeOnly':   'true',
             'workingType': 'CONTRACT_PRICE',
@@ -166,7 +182,7 @@ class Client:
         p = {
             'symbol':      sym, 'side': side,
             'type':        'TAKE_PROFIT_MARKET',
-            'quantity':    qty,
+            'quantity':    self._fmt_qty(qty),
             'stopPrice':   f"{stop_price:.8f}".rstrip('0').rstrip('.'),
             'closeOnly':   'true',
             'workingType': 'CONTRACT_PRICE',
@@ -360,6 +376,7 @@ class AlphaBot:
         self.avg_win      = 0.0
         self.avg_loss     = 0.0
         self.scan_count   = 0
+        self._last_risk_sync = 0.0   # unix ts of last positionRisk sync
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -841,9 +858,11 @@ class AlphaBot:
 
     def sector_count(self, sym: str) -> int:
         sec = self.sector.get(sym, 'Other')
+        if sec == 'Other':
+            return 0  # uncategorized coins are not assumed correlated
         return sum(1 for s in self.positions if self.sector.get(s, 'Other') == sec)
 
-    def analyse_symbol(self, sym: str) -> dict | None:
+    def analyse_symbol(self, sym: str, price_hint: float = 0.0) -> dict | None:
         try:
             raw5  = self.client.klines(sym, config.TF_FAST, config.KLINE_LIMIT)
             raw15 = self.client.klines(sym, config.TF_MED,  config.KLINE_LIMIT)
@@ -879,8 +898,10 @@ class AlphaBot:
         except:
             h1_bull = True  # default: no filter
 
-        try: price = self.client.price(sym)
-        except: price = 0.0
+        price = price_hint if price_hint > 0 else 0.0
+        if price <= 0:
+            try: price = self.client.price(sym)
+            except: price = 0.0
 
         return {
             'symbol':    sym,
@@ -915,7 +936,7 @@ class AlphaBot:
             tp1_m = config.ATR_TP1_MULT_MAJOR if is_maj else config.ATR_TP1_MULT
             tp2_m = config.ATR_TP2_MULT_MAJOR if is_maj else config.ATR_TP2_MULT
             tp3_m = config.ATR_TP3_MULT_MAJOR if is_maj else config.ATR_TP3_MULT
-            sl_d  = atr * sl_m
+            sl_d  = max(atr * sl_m, entry * config.MIN_SL_DIST_PCT / 100)
             tp1_d = atr * tp1_m
             tp2_d = atr * tp2_m
             tp3_d = atr * tp3_m
@@ -1003,10 +1024,10 @@ class AlphaBot:
                 self.emit('fail', f"{sym} Daily BULL SHORT needs {need:.0f}%+ got {conf:.0f}% → SKIP"); return
 
         # ── BTC 10m momentum gate — don't open altcoin entries against BTC flow
-        if not is_major and abs(self._btc_5m_mom) > 0.25:
-            if direction == 'long' and self._btc_5m_mom < -0.25:
+        if not is_major and abs(self._btc_5m_mom) > 0.40:
+            if direction == 'long' and self._btc_5m_mom < -0.40:
                 self.emit('fail', f"{sym} BTC 10m={self._btc_5m_mom:+.2f}% falling → no altcoin LONG → SKIP"); return
-            if direction == 'short' and self._btc_5m_mom > 0.25:
+            if direction == 'short' and self._btc_5m_mom > 0.40:
                 self.emit('fail', f"{sym} BTC 10m={self._btc_5m_mom:+.2f}% rising → no altcoin SHORT → SKIP"); return
 
         # ── Pro gate 1: BTC macro filter — much stricter bear/bull filters ────
@@ -1175,20 +1196,52 @@ class AlphaBot:
         )
 
     async def update_positions(self):
+        # Every 30s sync P&L directly from exchange (mark price + funding fees)
+        # so dashboard values match what the Binance app shows
+        _exchange_pnl: dict[str, tuple[float, float]] = {}  # sym → (mark_price, unrealized_pnl)
+        now = time.time()
+        if self.positions and now - self._last_risk_sync >= 30:
+            try:
+                loop = asyncio.get_event_loop()
+                risks = await loop.run_in_executor(None, self.client.position_risk)
+                for r in risks:
+                    sym = r.get('symbol', '')
+                    if sym in self.positions:
+                        mp  = float(r.get('markPrice', 0) or 0)
+                        upl = float(r.get('unRealizedProfit', 0) or 0)
+                        if mp > 0:
+                            _exchange_pnl[sym] = (mp, upl)
+                self._last_risk_sync = now
+            except Exception as _re:
+                log.debug(f"[RISK SYNC] {_re}")
+
         for sym in list(self.positions):
             pos = self.positions.get(sym)
             if pos is None: continue
             try:
-                current = self.client.price(sym)
-                pos['current'] = current
+                # Use exchange mark price when available, fall back to last price
+                if sym in _exchange_pnl:
+                    current, ex_pnl_usd = _exchange_pnl[sym]
+                    pos['current'] = current
+                    pos['pnl_usd'] = round(ex_pnl_usd, 4)
+                    pos['pnl_pct'] = round(
+                        ex_pnl_usd / pos['size_usd'] * 100 if pos['size_usd'] else 0, 2
+                    )
+                else:
+                    current = self.client.price(sym)
+                    pos['current'] = current
                 d     = pos['direction']
                 sign  = +1 if d == 'long' else -1
                 entry = pos['entry']
+                if sym not in _exchange_pnl:
+                    lev_used = pos.get('leverage', config.LEVERAGE)
+                    pnl_pct  = sign * ((current / entry) - 1) * lev_used * 100
+                    pos['pnl_pct'] = round(pnl_pct, 2)
+                    pos['pnl_usd'] = round(pos['size_usd'] * pnl_pct / 100, 4)
+                current = pos['current']
+                pnl_pct = pos['pnl_pct']
 
                 lev_used = pos.get('leverage', config.LEVERAGE)
-                pnl_pct  = sign * ((current / entry) - 1) * lev_used * 100
-                pos['pnl_pct'] = round(pnl_pct, 2)
-                pos['pnl_usd'] = round(pos['size_usd'] * pnl_pct / 100, 4)
 
                 # Breakeven lock
                 if not pos['be_locked']:
@@ -1200,11 +1253,12 @@ class AlphaBot:
                         self.emit('info', f"🔒 BE-locked {sym} @ {current:.6g}")
                         self._save_positions()
 
-                # TP1 — move exchange SL to breakeven
+                # TP1 — bank half the position, move SL to breakeven, let rest run
                 if not pos['tp1_hit'] and sign * (current - pos['tp1']) >= 0:
                     pos['tp1_hit'] = True
                     pos['phase']   = 'tp1-trail'
-                    self.emit('info', f"🎯 TP1 {sym} → SL→BE, trailing to TP2={pos['tp2']:.5g}")
+                    await self._partial_close(sym, pos, config.TP1_SCALE_OUT, current)
+                    self.emit('info', f"🎯 TP1 {sym} → SL→BE, runner trails to TP2={pos['tp2']:.5g}")
                     self._move_sl_to_breakeven(sym, pos)
                     self._save_positions()
 
@@ -1237,6 +1291,34 @@ class AlphaBot:
             except Exception as e:
                 log.debug(f"update {sym}: {e}")
 
+    async def _partial_close(self, sym: str, pos: dict, frac: float, price: float):
+        """Close a fraction of the position at market and bank the profit.
+        Called at TP1 so winners lock in gains instead of giving them back on retrace."""
+        part = self.client.round_qty(sym, pos['qty'] * frac)
+        if part <= 0 or part >= pos['qty']:
+            return  # too small to split — keep full runner
+        d    = pos['direction']
+        sign = +1 if d == 'long' else -1
+        try:
+            self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', part,
+                                     reduce=True, current_price=price)
+        except Exception as e:
+            self.emit('warn', f"TP1 scale-out fail {sym}: {e}")
+            return
+        entry      = pos['entry']
+        closed_usd = part * entry
+        pnl_usd    = sign * (price - entry) * part
+        self.total_pnl += pnl_usd
+        self.daily_pnl += pnl_usd
+        if config.PAPER_MODE:
+            self.paper_balance += pnl_usd + closed_usd / pos.get('leverage', config.LEVERAGE)
+        pos['qty']      = round(pos['qty'] - part, 8)
+        pos['size_usd'] = round(pos['qty'] * entry, 4)
+        self.balance = self.client.usdt_balance(self.paper_balance)
+        self.emit('exec',
+            f"💰 TP1 BANKED {sym}: {frac*100:.0f}% closed @ {price:.6g} → "
+            f"{pnl_usd:+.4f}$ | runner qty={pos['qty']} → TP2={pos['tp2']:.5g}")
+
     async def close(self, sym: str, pos: dict, pnl_pct: float, reason: str):
         d = pos['direction']
         # Cancel exchange SL/TP orders before closing — prevents double-close
@@ -1258,7 +1340,8 @@ class AlphaBot:
 
         self.total_pnl     += pnl_usd
         self.daily_pnl     += pnl_usd
-        self.paper_balance += pnl_usd + pos['size_usd'] / config.LEVERAGE
+        # Return margin using the SAME leverage it was deducted with at open
+        self.paper_balance += pnl_usd + pos['size_usd'] / pos.get('leverage', config.LEVERAGE)
         self.perf.add(pnl_pct, is_win)
 
         # Consecutive loss guard — block new entries for 20 min after N straight losses
@@ -1377,6 +1460,7 @@ class AlphaBot:
             ]
 
         while self.running:
+          try:
             self.check_daily()
             self.scan_count += 1
             session  = current_session()
@@ -1451,13 +1535,32 @@ class AlphaBot:
 
             candidates   = []
             scan_results = []
-            scan_syms    = symbols   # may be updated by movers refresh above
+            scan_syms    = symbols if self.running else []
+
+            # Pre-build price map from tickers — saves 1 API call per coin
+            _prices: dict[str, float] = {}
+            try:
+                _tick = await asyncio.get_event_loop().run_in_executor(None, self.client.tickers_24h)
+                _prices = {t['symbol']: float(t['lastPrice']) for t in _tick if t.get('lastPrice')}
+            except Exception:
+                pass
 
             loop = asyncio.get_event_loop()
-            for sym in scan_syms:
+            for _scan_i, sym in enumerate(scan_syms):
                 if not self.running: break
-                # Run blocking IO (requests + time.sleep) in thread so WS stays alive
-                a = await loop.run_in_executor(None, self.analyse_symbol, sym)
+                # Refresh open positions every 30 coins so dashboard stays live during long scans
+                if _scan_i > 0 and _scan_i % 30 == 0 and self.positions:
+                    try:
+                        await self.update_positions()
+                        await self.push()
+                    except Exception:
+                        pass
+                try:
+                    ph = _prices.get(sym, 0.0)
+                    a  = await loop.run_in_executor(None, self.analyse_symbol, sym, ph)
+                except Exception as _sym_err:
+                    log.warning(f"[SCAN] {sym}: {_sym_err}")
+                    continue
                 if a is None: continue
 
                 r = {k: v for k, v in a.items() if k != 'sig'}
@@ -1506,9 +1609,21 @@ class AlphaBot:
 
             for _ in range(config.SCAN_INTERVAL_SEC):
                 if not self.running: break
-                await self.update_positions()
-                await self.push()
+                try:
+                    await self.update_positions()
+                except Exception as _upd_err:
+                    log.error(f"[UPDATE_POS] {_upd_err}")
+                try:
+                    await self.push()
+                except Exception as _push_err:
+                    log.error(f"[PUSH] {_push_err}")
                 await asyncio.sleep(1)
+
+          except Exception as _cycle_err:
+            import traceback as _tb2
+            log.error(f"[SCAN CYCLE CRASH] {_cycle_err}\n{_tb2.format_exc()}")
+            log.info("[SCAN CYCLE] Auto-recovering in 10s...")
+            await asyncio.sleep(10)
 
     async def ws_handler(self, ws):
         self.ws_clients.add(ws)
@@ -1520,6 +1635,12 @@ class AlphaBot:
             self.ws_clients.discard(ws)
 
     async def run(self):
+        # Log any asyncio task exception that would otherwise be silently swallowed
+        def _async_exc_handler(loop, context):
+            exc = context.get('exception', context.get('message', '?'))
+            log.error(f"[ASYNCIO UNHANDLED] {exc}")
+        asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
+
         server = await websockets.serve(self.ws_handler, config.WS_HOST, config.WS_PORT)
         sep = '=' * 70
         dash= '-' * 70

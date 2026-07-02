@@ -19,6 +19,7 @@ import asyncio
 import io
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import threading
@@ -72,7 +73,7 @@ POLY_MODE   = '--poly' in sys.argv
 WS_URL      = 'ws://localhost:8766' if POLY_MODE else 'ws://localhost:8765'
 BOT_SCRIPT  = 'poly_bot.py'         if POLY_MODE else 'bot.py'
 BROWSER_URL = 'http://localhost:8080/poly_terminal.html' if POLY_MODE \
-              else 'http://localhost:8080/terminal.html'
+              else pathlib.Path(__file__).with_name('atlas.html').as_uri()
 REFRESH_HZ  = 6       # screen updates per second
 BOT_LABEL   = 'PolyAlphaBot' if POLY_MODE else 'AlphaBot'
 
@@ -190,6 +191,29 @@ def restart_bot():
         creationflags=flags,
     )
 
+# ─── ATLAS design palette (matches AlphaBot Dashboard v4 design) ──────────────
+TEAL   = '#00ffcc'
+PINK   = '#ff0080'
+VIOLET = '#a366ff'
+AMBER  = '#f59e0b'
+CYAN2  = '#06b6d4'
+TXT    = '#c0c0e8'
+FAINT  = '#5a5a8a'
+
+def _pcol(v: float) -> str:
+    return TEAL if v >= 0 else PINK
+
+_SPARK_CH = '▁▂▃▄▅▆▇█'
+_pos_spark: dict = {}   # symbol → [pnl_pct history] for position sparklines
+
+def _spark_line(hist: list, width: int = 12) -> str:
+    if not hist: return '─' * width
+    h = hist[-width:]
+    lo, hi = min(h), max(h)
+    rng = (hi - lo) or 1.0
+    s = ''.join(_SPARK_CH[int((v - lo) / rng * (len(_SPARK_CH) - 1))] for v in h)
+    return s.rjust(width, '─')
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 def _pnl_bar(pct: float, width: int = 14) -> Text:
     """Compact visual bar: green for profit, red for loss."""
@@ -260,65 +284,72 @@ def _header(S: dict) -> Panel:
     else:           fng_col, fng_lbl = 'dim white',      'NEUTRAL'
 
     ts = datetime.utcnow().strftime('%H:%M:%S UTC')
+    start_bal = S.get('start_bal', 0) or 0
+    sess_pct  = ((bal / start_bal) - 1) * 100 if start_bal else 0.0
 
-    # ── Row 1: Brand + Status + Balance ─────────────────────────────────────
+    # ── Row 1: ATLAS status bar ──────────────────────────────────────────────
     r1 = Text(justify='center')
-    r1.append(f'  {BOT_LABEL} v5.0  ', style='bold bright_white on grey11')
-    r1.append('  ', style='')
-    r1.append(conn_lbl, style=f'bold {conn_col}')
+    r1.append('● ', style=f'bold {TEAL}' if _connected else f'bold {PINK}')
+    r1.append('A T L A S', style=f'bold {TEAL}')
+    r1.append(' v5.0', style=FAINT)
     if paused:
-        r1.append('  PAUSED', style='bold yellow')
-    r1.append('  ', style='')
-    r1.append(mode_lbl, style=f'bold {mode_col}')
-    r1.append('    Balance ', style='dim')
-    r1.append(f'${bal:>12,.2f}', style='bold bright_white')
-    r1.append('    Day ', style='dim')
-    r1.append(f'{dpnl:+,.2f}', style=f'bold {dpnl_col}')
-    r1.append('    Total ', style='dim')
-    r1.append(f'{tpnl:+,.2f}', style=f'bold {tpnl_col}')
-    r1.append('    WR ', style='dim')
-    r1.append(f'{wr:.0f}%', style=f'bold {wr_col}')
-    r1.append(f'  {wins}W/{losses}L', style='dim')
-    r1.append(f'    Pos {pos_n}', style='dim')
-    r1.append(f'    {ts}', style='dim')
+        r1.append('  ⏸ PAUSED', style=f'bold {AMBER}')
+    r1.append('  │  ', style=FAINT)
+    r1.append('BAL ', style=FAINT)
+    r1.append(f'${bal:,.2f}', style='bold #e0e0ff')
+    r1.append('   DAY ', style=FAINT)
+    r1.append(f'{dpnl:+,.2f}', style=f'bold {_pcol(dpnl)}')
+    r1.append('   TOTAL ', style=FAINT)
+    r1.append(f'{tpnl:+,.2f}', style=f'bold {_pcol(tpnl)}')
+    r1.append('   SESSION ', style=FAINT)
+    r1.append(f'{sess_pct:+.3f}%', style=f'bold {_pcol(sess_pct)}')
+    r1.append('  │  ', style=FAINT)
+    r1.append('WR ', style=FAINT)
+    r1.append(f'{wr:.0f}%', style=f'bold {AMBER}')
+    r1.append(f'  {wins}W/{losses}L', style=FAINT)
+    r1.append('  POS ', style=FAINT)
+    r1.append(str(pos_n), style=f'bold {TEAL}')
+    r1.append('  SCAN ', style=FAINT)
+    r1.append(f'#{scan}', style=f'bold {VIOLET}')
+    r1.append('  │  ', style=FAINT)
+    r1.append(f'{str(sess).upper()} SESSION', style=CYAN2)
+    r1.append(f'  {ts}', style=f'bold {TEAL}')
+    if paper:
+        r1.append('  PAPER', style=f'bold {AMBER}')
 
-    # ── Row 2: BTC multi-timeframe + RSI bar ────────────────────────────────
+    # ── Row 2: BTC multi-timeframe + RSI ────────────────────────────────────
+    tcol = lambda tr: TEAL if tr == 'BULL' else (PINK if tr == 'BEAR' else AMBER)
     r2 = Text(justify='center')
-    r2.append('  BTC ', style='dim')
-    r2.append('1H:', style='dim')
-    r2.append(f'{trend}', style=f'bold {trend_col}')
-    r2.append('  4H:', style='dim')
-    r2.append(f'{trend4h}', style=f'bold {t4h_col}')
-    r2.append('  DAILY:', style='dim')
-    r2.append('BULL' if daily_bull else 'BEAR', style=f'bold {daily_col}')
-    r2.append('    RSI ', style='dim')
-    r2.append_text(rsi_bar(rsi, 18))
-    r2.append(f' {rsi:.0f} ', style=f'bold {rsi_col}')
-    r2.append(rsi_lbl, style=rsi_col)
-    r2.append('    10m:', style='dim')
-    r2.append(f'{btc5m:+.2f}%', style=f'bold {mom_col}')
-    r2.append(f'    {sess} session    Scan #{scan}', style='dim')
+    r2.append('1H: ', style=FAINT)
+    r2.append(trend, style=f'bold {tcol(trend)}')
+    r2.append('   4H: ', style=FAINT)
+    r2.append(trend4h, style=f'bold {tcol(trend4h)}')
+    r2.append('   DAILY: ', style=FAINT)
+    r2.append('BULL' if daily_bull else 'BEAR', style=f'bold {TEAL if daily_bull else PINK}')
+    r2.append('   BTC 10m: ', style=FAINT)
+    r2.append(f'{btc5m:+.2f}%', style=f'bold {_pcol(btc5m)}')
+    r2.append('   RSI ', style=FAINT)
+    r2.append_text(rsi_bar(rsi, 16))
+    r2.append(f' {rsi:.0f} {rsi_lbl}', style=f'bold {rsi_col}')
 
-    # ── Row 3: Fear & Greed + Market breadth ────────────────────────────────
+    # ── Row 3: Fear & Greed + breadth ────────────────────────────────────────
     r3 = Text(justify='center')
-    r3.append('  Fear & Greed: ', style='dim')
+    r3.append('F&G ', style=FAINT)
     fng_filled = max(0, min(20, int(fng / 5)))
-    r3.append('█' * fng_filled, style=fng_col)
-    r3.append('░' * (20 - fng_filled), style='bright_black')
-    r3.append(f' {fng} ', style=f'bold {fng_col}')
-    r3.append(fng_lbl, style=fng_col)
+    r3.append('█' * fng_filled, style=AMBER)
+    r3.append('░' * (20 - fng_filled), style='grey15')
+    r3.append(f' {fng} {fng_lbl}', style=f'bold {fng_col}')
     up_n = mi.get('up_count', 0)
     dn_n = mi.get('down_count', 0)
-    tot_p = mi.get('total_scanned', 0)
     btc_chg = mi.get('btc_change', 0) or 0
-    r3.append(f'    Market: ', style='dim')
+    r3.append('   MARKET ', style=FAINT)
     r3.append(mood, style=f'bold {mood_col}')
-    r3.append(f'  {up_n}', style='bright_green')
-    r3.append('up ', style='dim green')
-    r3.append(f'{dn_n}', style='bright_red')
-    r3.append(f'dn /{tot_p}', style='dim')
-    r3.append('    BTC 24h:', style='dim')
-    r3.append(f'{btc_chg:+.2f}%', style='bright_green' if btc_chg >= 0 else 'bright_red')
+    r3.append(f'  {up_n}', style=TEAL)
+    r3.append('▲ ', style=TEAL)
+    r3.append(f'{dn_n}', style=PINK)
+    r3.append('▼', style=PINK)
+    r3.append('   BTC 24h ', style=FAINT)
+    r3.append(f'{btc_chg:+.2f}%', style=f'bold {_pcol(btc_chg)}')
 
     body = Text()
     body.append_text(r1)
@@ -327,7 +358,7 @@ def _header(S: dict) -> Panel:
     body.append('\n')
     body.append_text(r3)
 
-    return Panel(body, style='bright_black', height=5, padding=(0, 1))
+    return Panel(body, style=FAINT, border_style='#123a33', height=5, padding=(0, 1))
 
 # ─── Panel: Positions ─────────────────────────────────────────────────────────
 _PHASE_NAMES = {
@@ -373,44 +404,33 @@ def _ring3(pct: float, val_str: str, label: str, col: str, w: int = 7) -> Text:
     t.append('╯\n', style='dim')
     return t
 
-# ─── Panel: Ring gauges ───────────────────────────────────────────────────────
+# ─── Panel: Gauges (ATLAS horizontal bars) ────────────────────────────────────
 def _gauges(S: dict) -> Panel:
     wins   = S.get('wins', 0)
     losses = S.get('losses', 0)
     tot    = wins + losses
     wr     = wins / tot * 100 if tot else 0
-    perf   = S.get('perf') or {}
-    sharpe = float(perf.get('sharpe', S.get('sharpe', 0)) or 0)
     dd     = abs(float(S.get('max_dd', 0) or 0))
     fng    = int(S.get('fear_greed', 50))
+    rsi    = float(S.get('btc_rsi', 50) or 50)
 
-    wr_col  = 'bright_green' if wr >= 55 else ('yellow' if wr >= 45 else 'bright_red')
-    sh_col  = 'bright_green' if sharpe >= 1.5 else ('green' if sharpe >= 0.5 else 'yellow')
-    dd_col  = 'bright_red'   if dd > 15  else ('yellow' if dd > 5 else 'bright_green')
-    if fng <= 20:   fg_col = 'bright_green'
-    elif fng >= 80: fg_col = 'bright_red'
-    elif fng <= 40: fg_col = 'green'
-    elif fng >= 60: fg_col = 'yellow'
-    else:           fg_col = 'dim white'
+    def bar_row(label: str, pct: float, val: str, color: str, width: int = 16) -> Text:
+        t = Text()
+        filled = max(0, min(width, round(pct / 100 * width)))
+        t.append(f' {label:<9}', style=FAINT)
+        t.append('━' * filled, style=color)
+        t.append('━' * (width - filled), style='grey15')
+        t.append(f' {val:>5}\n', style=f'bold {color}')
+        return t
 
-    sh_pct  = min(100, max(0, sharpe / 3.0 * 100))
-    dd_pct  = max(0, 100 - dd * 5)          # 0% DD → 100%, 20% DD → 0%
-    fng_pct = fng                            # 0–100 directly
+    body = Text()
+    body.append_text(bar_row('WIN RATE', wr,               f'{wr:.0f}%',  TEAL))
+    body.append_text(bar_row('F&G',      fng,              str(fng),      AMBER))
+    body.append_text(bar_row('DRAWDOWN', min(100, dd * 3), f'{dd:.1f}%',  PINK))
+    body.append_text(bar_row('BTC RSI',  rsi,              f'{rsi:.0f}',  VIOLET))
 
-    g1 = _ring3(wr,     f'{wr:.0f}%', 'WR',  wr_col,  w=7)
-    g2 = _ring3(sh_pct, f'{sharpe:.1f}', 'SH', sh_col, w=7)
-    g3 = _ring3(dd_pct, f'{dd:.1f}%', 'DD',  dd_col,  w=7)
-    g4 = _ring3(fng_pct, str(fng),   'F&G', fg_col,  w=7)
-
-    grid = Table.grid(padding=(0, 1), expand=True)
-    grid.add_column(justify='center')
-    grid.add_column(justify='center')
-    grid.add_column(justify='center')
-    grid.add_column(justify='center')
-    grid.add_row(g1, g2, g3, g4)
-
-    return Panel(grid, title='[bold bright_white]GAUGES[/]',
-                 border_style='bright_black', expand=True, padding=(0, 1))
+    return Panel(body, title=f'[bold {TXT}]GAUGES[/]',
+                 border_style='#123a33', expand=True, padding=(0, 1))
 
 
 def _positions(S: dict) -> Panel:
@@ -426,14 +446,16 @@ def _positions(S: dict) -> Panel:
     tbl.add_column('Lev',     width=4,  justify='right', no_wrap=True)
     tbl.add_column('Entry',   width=9,  justify='right', no_wrap=True)
     tbl.add_column('Now',     width=9,  justify='right', no_wrap=True)
-    tbl.add_column('P&L %',  width=18, no_wrap=True)
+    tbl.add_column('P&L %',  width=8,  justify='right', no_wrap=True)
+    tbl.add_column('Trend',   width=13, no_wrap=True)
     tbl.add_column('P&L $',  width=8,  justify='right', no_wrap=True)
     tbl.add_column('Ph',      width=5,  no_wrap=True)
 
+    seen = set()
     if not positions:
         tbl.add_row(
-            Text('No positions — scanning', style='dim'),
-            '', '', '', '', '', '', ''
+            Text('No positions — scanning…', style=FAINT),
+            '', '', '', '', '', '', '', ''
         )
     else:
         for p in positions:
@@ -446,54 +468,59 @@ def _positions(S: dict) -> Panel:
             pu    = p.get('pnl_usd', 0)
             phase = p.get('phase', 'open')
 
+            # sparkline history — append only on change
+            seen.add(sym)
+            h = _pos_spark.setdefault(sym, [])
+            if not h or abs(h[-1] - pp) > 0.005:
+                h.append(pp)
+                if len(h) > 40: del h[:-40]
+
             is_long = d == 'long'
-            dir_col = 'bold bright_green' if is_long else 'bold bright_red'
-            dir_sym = '▲' if is_long else '▼'
-            lev_col = ('bright_yellow' if lev >= 20 else 'yellow' if lev >= 15 else 'dim')
-            pp_col  = 'bright_green' if pp > 0 else ('bright_red' if pp < 0 else 'dim')
+            dir_col = f'bold {TEAL}' if is_long else f'bold {PINK}'
+            dir_sym = '▲ L' if is_long else '▼ S'
+            lev_col = (AMBER if lev >= 15 else FAINT)
+            pp_col  = _pcol(pp) if pp else FAINT
 
-            pnl_cell = Text()
-            pnl_cell.append(f'{pp:+6.2f}%', style=f'bold {pp_col}')
-            pnl_cell.append(' ', style='')
-            pnl_cell.append_text(_pnl_bar(pp, 9))
-
-            ph_lbl, ph_col = _PHASE_NAMES.get(phase, (phase.upper()[:4], 'dim'))
+            ph_lbl, _old = _PHASE_NAMES.get(phase, (phase.upper()[:4], 'dim'))
 
             tbl.add_row(
-                Text(sym, style='bold white'),
+                Text(sym, style=f'bold {TXT}'),
                 Text(dir_sym, style=dir_col),
                 Text(f'{lev}x', style=lev_col),
-                Text(_fmt_price(entry), style='dim'),
-                Text(_fmt_price(curr),  style='white'),
-                pnl_cell,
-                Text(f'{pu:+.1f}', style=f'bold {pp_col}'),
-                Text(ph_lbl, style=ph_col),
+                Text(_fmt_price(entry), style=FAINT),
+                Text(_fmt_price(curr),  style=TXT),
+                Text(f'{pp:+.2f}%', style=f'bold {pp_col}'),
+                Text(_spark_line(h, 12), style=pp_col),
+                Text(f'{pu:+.2f}', style=f'bold {pp_col}'),
+                Text(ph_lbl, style=f'bold {VIOLET}'),
             )
+    # drop sparkline history for closed positions
+    for s in list(_pos_spark):
+        if positions and s not in seen: del _pos_spark[s]
 
     open_n  = len(positions)
     longs   = sum(1 for p in positions if p.get('direction') == 'long')
     shorts  = open_n - longs
     tot_pnl = sum(p.get('pnl_usd', 0) for p in positions)
-    tot_col = 'bright_green' if tot_pnl >= 0 else 'bright_red'
 
     title = (
-        f'[bold bright_blue]POSITIONS[/]  '
-        f'[bold white]{open_n}[/][dim]/5[/]  '
-        f'[bright_green]{longs}L[/] [bright_red]{shorts}S[/]  '
-        f'[dim]P&L [/][{tot_col}]{tot_pnl:+.2f}$[/{tot_col}]'
+        f'[bold {TEAL}]POSITIONS[/]  '
+        f'[bold {TXT}]{open_n}[/][{FAINT}]/5[/]  '
+        f'[{TEAL}]{longs}L[/] [{PINK}]{shorts}S[/]  '
+        f'[{_pcol(tot_pnl)}]{tot_pnl:+.2f}$[/]'
     )
-    return Panel(tbl, title=title, border_style='blue', expand=True, padding=(0, 0))
+    return Panel(tbl, title=title, border_style='#123a33', expand=True, padding=(0, 0))
 
-# ─── Panel: Scanner feed ──────────────────────────────────────────────────────
+# ─── Panel: Signal feed (ATLAS design) ────────────────────────────────────────
 _TYPE_CFG = {
-    'pass':  ('bright_cyan',   '✓ PASS'),
-    'fail':  ('bright_black',  '· fail'),
-    'exec':  ('bright_green',  '▶ EXEC'),
-    'exit':  ('yellow',        '◼ EXIT'),
-    'warn':  ('yellow',        '! WARN'),
-    'info':  ('white',         '  info'),
-    'scan':  ('bright_black',  '──────'),
-    'error': ('bright_red',    '✗ ERR '),
+    'pass':  (TEAL,    'SIGNAL'),
+    'fail':  (AMBER,   'FILTER'),
+    'exec':  (TEAL,    '▶ EXEC'),
+    'exit':  (PINK,    '◼ EXIT'),
+    'warn':  (PINK,    'ALERT '),
+    'info':  (VIOLET,  'INFO  '),
+    'scan':  (FAINT,   '──────'),
+    'error': (PINK,    '✗ ERR '),
 }
 
 def _scanner(S: dict, frame: int) -> Panel:
@@ -510,14 +537,14 @@ def _scanner(S: dict, frame: int) -> Panel:
 
     # Status line
     if _connected:
-        body.append(f'  {spin} ', style='bright_cyan')
-        body.append(f'Live  Scan #{scan_n}   ', style='cyan')
-        body.append(f'{pass_n} pass  ', style='bright_cyan')
-        body.append(f'{fail_n} filtered  ', style='bright_black')
-        body.append(f'{exec_n} opened  ', style='bright_green')
-        body.append(f'{exit_n} closed\n\n', style='yellow')
+        body.append(f'  {spin} ', style=TEAL)
+        body.append(f'LIVE  #{scan_n}   ', style=CYAN2)
+        body.append(f'{pass_n} SIGNALS  ', style=TEAL)
+        body.append(f'{fail_n} FILTERS  ', style=AMBER)
+        body.append(f'{exec_n} EXEC  ', style=f'bold {TEAL}')
+        body.append(f'{exit_n} EXITS\n\n', style=PINK)
     else:
-        body.append('  ✗ OFFLINE — waiting for bot...\n\n', style='bold bright_red')
+        body.append('  ✗ OFFLINE — waiting for bot...\n\n', style=f'bold {PINK}')
 
     # Log feed — skip pure 'scan' separator lines, show meaningful events
     max_lines = 28
@@ -535,19 +562,19 @@ def _scanner(S: dict, frame: int) -> Panel:
         if len(msg) > max_w:
             msg = msg[:max_w - 1] + '…'
 
-        body.append(f'  {ts} ', style='bright_black')
-        body.append(f'{tag} ', style=col)
-        body.append(f'{msg}\n', style=col)
+        body.append(f'  {ts} ', style=FAINT)
+        body.append(f'{tag} ', style=f'bold {col}')
+        body.append(f'{msg}\n', style=col if etype in ('exec', 'exit', 'warn', 'pass') else FAINT)
         shown += 1
 
     title = (
-        f'[bold bright_cyan]SCANNER[/]  '
-        f'[dim]#{scan_n}[/]  '
-        f'[bright_cyan]{pass_n} pass[/]  '
-        f'[bright_green]{exec_n} opened[/]  '
-        f'[yellow]{exit_n} closed[/]'
+        f'[bold {TEAL}]● SIGNAL FEED[/]  '
+        f'[{FAINT}]#{scan_n}[/]  '
+        f'[{TEAL}]{pass_n}[/][{FAINT}] sig[/]  '
+        f'[{AMBER}]{fail_n}[/][{FAINT}] fil[/]  '
+        f'[{PINK}]{exit_n}[/][{FAINT}] exit[/]'
     )
-    return Panel(body, title=title, border_style='cyan', expand=True)
+    return Panel(body, title=title, border_style='#123a33', expand=True)
 
 # ─── Panel: Market Intel ──────────────────────────────────────────────────────
 def _market(S: dict, frame: int) -> Panel:
@@ -634,16 +661,16 @@ def _market(S: dict, frame: int) -> Panel:
                 t.append('\n')
 
     title = (
-        f'[bold bright_yellow]MARKET[/]  '
+        f'[bold {AMBER}]MARKET[/]  '
         f'[{mood_col}]{mood}[/{mood_col}]  '
-        f'[dim]{spin}[/]  '
-        f'[dim]{tot} perps[/]'
+        f'[{FAINT}]{spin}  {tot} perps[/]'
     )
-    return Panel(t, title=title, border_style='yellow', expand=True)
+    return Panel(t, title=title, border_style='#3a2a08', expand=True)
 
-# ─── Panel: Trades ────────────────────────────────────────────────────────────
+# ─── Panel: Trades (ATLAS card grid — last 6 trades as cells) ─────────────────
 def _trades(S: dict) -> Panel:
-    trades    = list(reversed(S.get('trades') or []))[:10]
+    all_trades = S.get('trades') or []
+    trades    = list(reversed(all_trades))[:6]
     wins      = S.get('wins', 0)
     losses    = S.get('losses', 0)
     tot       = wins + losses
@@ -652,104 +679,104 @@ def _trades(S: dict) -> Panel:
     avg_win   = S.get('avg_win',  0)
     avg_loss  = S.get('avg_loss', 0)
 
-    tbl = Table(
-        box=box.SIMPLE_HEAD, expand=True, padding=(0, 1),
-        header_style='bold dim', show_edge=False,
-    )
-    tbl.add_column('#',      width=3,  justify='right')
-    tbl.add_column('Symbol', style='bold white', no_wrap=True, min_width=11)
-    tbl.add_column('Dir',    width=7)
-    tbl.add_column('Lev',    width=4,  justify='right')
-    tbl.add_column('Entry',             justify='right')
-    tbl.add_column('Exit',              justify='right')
-    tbl.add_column('P&L %',  width=8,  justify='right')
-    tbl.add_column('P&L $',  width=8,  justify='right')
-    tbl.add_column('Result', width=6)
-    tbl.add_column('Reason', width=14)
-    tbl.add_column('Time',   width=9)
+    gross_w = sum(t.get('pnl_usd', 0) for t in all_trades if t.get('is_win'))
+    gross_l = abs(sum(t.get('pnl_usd', 0) for t in all_trades if not t.get('is_win')))
+    pf = gross_w / gross_l if gross_l > 0 else (99.0 if gross_w > 0 else 0.0)
+
+    grid = Table.grid(padding=(0, 1), expand=True)
+    for _ in range(6):
+        grid.add_column(ratio=1, justify='center')
 
     if not trades:
-        tbl.add_row('', '[dim]No closed trades yet — bot scanning[/]',
-                    '', '', '', '', '', '', '', '', '')
+        empty = Text('No closed trades yet — scanning…', style=FAINT)
+        grid.add_row(empty, '', '', '', '', '')
     else:
-        for i, tr in enumerate(trades, 1):
+        cells = []
+        for tr in trades:
             d      = tr.get('direction', '')
             pp     = tr.get('pnl_pct', 0)
             pu     = tr.get('pnl_usd', 0)
-            lev    = tr.get('leverage', 10)
-            entry  = tr.get('entry', 0)
-            exit_p = tr.get('exit', tr.get('close', 0))
-            reason = tr.get('reason', tr.get('exit_reason', '—'))[:12]
-            ctime  = str(tr.get('close_time', tr.get('open_time', '')))[-8:]
+            won    = tr.get('is_win', pu > 0)
+            reason = str(tr.get('reason', '—'))[:14]
+            ctime  = str(tr.get('close_time', ''))[-8:]
+            rc     = TEAL if won else PINK
+            dc     = TEAL if d == 'long' else PINK
 
-            won     = pu > 0
-            dir_mk  = '[bright_green]▲ L[/]' if d == 'long' else '[bright_red]▼ S[/]'
-            res_mk  = '[bold bright_green]WIN[/]' if won else '[bold bright_red]LOSS[/]'
-            pp_col  = 'bright_green' if won else 'bright_red'
-            lev_col = 'bright_yellow' if lev >= 20 else ('yellow' if lev >= 15 else 'white')
+            c = Text(justify='center')
+            c.append('▔' * 12 + '\n', style=rc)
+            c.append(f"{'▲' if d == 'long' else '▼'} ", style=f'bold {dc}')
+            c.append(f"{tr.get('symbol', '')[:12]}\n", style=f'bold {TXT}')
+            c.append(f'{pp:+.2f}%\n', style=f'bold {_pcol(pp)}')
+            c.append(f"{'WIN' if won else 'LOSS'}", style=f'bold {rc}')
+            c.append(f' · {reason}\n', style=FAINT)
+            c.append(f'{pu:+.2f}$  {ctime}', style=FAINT)
+            cells.append(c)
+        while len(cells) < 6:
+            cells.append(Text(''))
+        grid.add_row(*cells)
 
-            def fp(v):
-                if not v: return '—'
-                return f'{v:,.2f}' if v >= 10 else f'{v:.4f}'
-
-            tbl.add_row(
-                str(i),
-                tr.get('symbol', ''),
-                Text.from_markup(dir_mk),
-                Text.from_markup(f'[{lev_col}]{lev}X[/]'),
-                fp(entry),
-                fp(exit_p),
-                Text.from_markup(f'[{pp_col}]{pp:+.2f}%[/]'),
-                Text.from_markup(f'[{pp_col}]{pu:+.2f}[/]'),
-                Text.from_markup(res_mk),
-                Text(reason, style='dim'),
-                ctime,
-            )
-
-    wr_col  = 'bright_green' if wr >= 55 else ('yellow' if wr >= 45 else 'bright_red')
-    pnl_col = 'bright_green' if total_pnl >= 0 else 'bright_red'
-    rr = abs(avg_win / avg_loss) if avg_loss else 0
-
+    pf_col = TEAL if pf >= 1.5 else (AMBER if pf >= 1.0 else PINK)
     title = (
-        f'[bold bright_magenta]TRADES[/]  '
-        f'[dim]{wins}W / {losses}L[/]  '
-        f'[{wr_col}]WR {wr:.0f}%[/]  '
-        f'[dim]Total [/][{pnl_col}]{total_pnl:+.2f}$[/{pnl_col}]  '
-        f'[dim]RR {rr:.1f}x   AvgW {avg_win:+.2f}%   AvgL {avg_loss:+.2f}%[/]'
+        f'[bold {PINK}]TRADES[/]  '
+        f'[{FAINT}]{wins}W / {losses}L[/]  '
+        f'[{AMBER}]WR {wr:.0f}%[/]  '
+        f'[{_pcol(total_pnl)}]Total {total_pnl:+.2f}$[/]  '
+        f'[{pf_col}]PF {pf:.2f}[/]  '
+        f'[{FAINT}]AvgW {avg_win:+.2f}%  AvgL {avg_loss:+.2f}%[/]'
     )
-    return Panel(tbl, title=title, border_style='magenta', expand=True)
+    return Panel(grid, title=title, border_style='#3a0a22', expand=True)
 
 # ─── Panel: Stats (sidebar strip) ────────────────────────────────────────────
 def _stats(S: dict) -> Panel:
     perf    = S.get('perf') or {}
     sharpe  = perf.get('sharpe', S.get('sharpe', 0)) or 0
     sortino = perf.get('sortino', S.get('sortino', 0)) or 0
-    calmar  = perf.get('calmar', 0) or 0
     dd      = S.get('max_dd', 0) or 0
-    positions = S.get('positions') or []
-    scan_results = S.get('scan_results') or []
-    pass_n = len([r for r in scan_results if r.get('confidence', 0) >= 38])
+    trades  = S.get('trades') or []
+    wins    = S.get('wins', 0)
+    losses  = S.get('losses', 0)
+    tot     = wins + losses
+    wr      = S.get('win_rate', 0)
+
+    # Analytics from actual trade history
+    win_usd  = [t['pnl_usd'] for t in trades if t.get('is_win')]
+    loss_usd = [t['pnl_usd'] for t in trades if not t.get('is_win')]
+    gross_win  = sum(win_usd)
+    gross_loss = abs(sum(loss_usd))
+    pf   = gross_win / gross_loss if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
+    avg_w = gross_win / len(win_usd) if win_usd else 0.0
+    avg_l = -gross_loss / len(loss_usd) if loss_usd else 0.0
+    expect = (wr / 100 * avg_w) + ((1 - wr / 100) * avg_l) if tot else 0.0
+    best  = max((t['pnl_usd'] for t in trades), default=0.0)
+    worst = min((t['pnl_usd'] for t in trades), default=0.0)
+    ws    = perf.get('win_streak', 0)
+    ls    = perf.get('loss_streak', 0)
 
     def metric(label, value, color='white', suffix=''):
         t = Text()
-        t.append(f'  {label:<12}', style='dim')
+        t.append(f'  {label:<11}', style='dim')
         t.append(f'{value}{suffix}\n', style=f'bold {color}')
         return t
 
-    sharpe_col  = 'bright_green' if sharpe >= 1 else ('yellow' if sharpe >= 0 else 'bright_red')
-    dd_col      = 'bright_green' if dd < 5 else ('yellow' if dd < 10 else 'bright_red')
+    pf_col  = 'bright_green' if pf >= 1.5 else ('yellow' if pf >= 1.0 else 'bright_red')
+    ex_col  = 'bright_green' if expect > 0 else 'bright_red'
+    wr_col  = 'bright_green' if wr >= 50 else ('yellow' if wr >= 40 else 'bright_red')
+    sh_col  = 'bright_green' if sharpe >= 1 else ('yellow' if sharpe >= 0 else 'bright_red')
+    dd_col  = 'bright_green' if dd < 5 else ('yellow' if dd < 10 else 'bright_red')
 
     t = Text()
-    t.append_text(metric('Sharpe',  f'{sharpe:.2f}',  sharpe_col))
-    t.append_text(metric('Sortino', f'{sortino:.2f}', sharpe_col))
-    t.append_text(metric('Calmar',  f'{calmar:.2f}',  sharpe_col))
-    t.append_text(metric('MaxDD',   f'{dd:.1f}',      dd_col, '%'))
-    t.append('\n', style='')
-    t.append_text(metric('OpenPos', str(len(positions)), 'white'))
-    t.append_text(metric('Signals', str(pass_n),         'cyan'))
+    t.append_text(metric('ProfitFac', f'{pf:.2f}',              pf_col))
+    t.append_text(metric('Expectancy',f'${expect:+.2f}/trade',  ex_col))
+    t.append_text(metric('WinRate',   f'{wr:.0f}% ({wins}W/{losses}L)', wr_col))
+    t.append_text(metric('AvgWin',    f'${avg_w:+.2f}',         'bright_green'))
+    t.append_text(metric('AvgLoss',   f'${avg_l:+.2f}',         'bright_red'))
+    t.append_text(metric('Best/Worst',f'${best:+.2f} / ${worst:+.2f}', 'white'))
+    t.append_text(metric('Streak',    f'{ws}W' if ws else f'{ls}L', 'bright_green' if ws else ('bright_red' if ls else 'white')))
+    t.append_text(metric('Sharpe',    f'{sharpe:.2f} / {sortino:.2f}', sh_col))
+    t.append_text(metric('MaxDD',     f'{dd:.1f}',              dd_col, '%'))
 
-    title = '[bold]⚡ STATS[/]'
-    return Panel(t, title=title, border_style='bright_black', expand=True)
+    title = f'[bold {TXT}]📊 TRADE ANALYTICS[/]'
+    return Panel(t, title=title, border_style='#123a33', expand=True)
 
 # ─── Panel: Balance Chart (full-width line chart) ─────────────────────────────
 def _balance_chart(S: dict) -> Panel:
@@ -769,25 +796,26 @@ def _balance_chart(S: dict) -> Panel:
     n      = len(vals)
     mins   = int((now - _balance_history[0][0]) / 60) if _balance_history else 0
     ses_pct = (vals[-1] - vals[0]) / vals[0] * 100 if n >= 2 and vals[0] else 0.0
-    ses_col  = 'bright_green' if ses_pct >= 0 else 'bright_red'
-    dpnl_col = 'bright_green' if dpnl >= 0 else 'bright_red'
-    tpnl_col = 'bright_green' if tpnl >= 0 else 'bright_red'
+    ses_col  = _pcol(ses_pct)
+    dpnl_col = _pcol(dpnl)
+    tpnl_col = _pcol(tpnl)
 
     # Stats line always shown at top
     stats = Text()
-    stats.append(f'  ${bal:,.2f}  ', style='bold bright_white')
-    stats.append('Day ', style='dim')
+    stats.append('  $', style=f'bold {TEAL}')
+    stats.append(f'{bal:,.2f}  ', style='bold #e8e8ff')
+    stats.append('DAY ', style=FAINT)
     stats.append(f'{dpnl:+,.2f}  ', style=f'bold {dpnl_col}')
-    stats.append('Total ', style='dim')
+    stats.append('TOTAL ', style=FAINT)
     stats.append(f'{tpnl:+,.2f}  ', style=f'bold {tpnl_col}')
-    stats.append('Session ', style='dim')
+    stats.append('SESSION ', style=FAINT)
     stats.append(f'{ses_pct:+.3f}%  ', style=f'bold {ses_col}')
-    stats.append(f'[{n}pts / {mins}min]\n', style='dim')
+    stats.append(f'[{n}pts / {mins}min]\n', style=FAINT)
 
     if n < 3:
-        stats.append('\n  Collecting balance history — line chart appears after ~60 seconds\n', style='dim')
-        return Panel(stats, title='[bold bright_green]BALANCE CHART[/]',
-                     border_style='green', expand=True)
+        stats.append('\n  Collecting balance history — line chart appears after ~60 seconds\n', style=FAINT)
+        return Panel(stats, title=f'[bold {TEAL}]◆ ATLAS · BALANCE[/]',
+                     border_style='#123a33', expand=True)
 
     lo  = min(vals)
     hi  = max(vals)
@@ -821,7 +849,7 @@ def _balance_chart(S: dict) -> Panel:
         body.append(f'  {label:>{max_lw}} ┤', style='dim')
         for col in range(W):
             y       = y_vals[col]
-            pt_col  = 'bright_green' if sampled[col] >= start_val else 'bright_red'
+            pt_col  = TEAL if sampled[col] >= start_val else PINK
             if y == chart_row:
                 body.append('─', style=pt_col)
             elif col > 0:
@@ -850,25 +878,24 @@ def _balance_chart(S: dict) -> Panel:
         body.append(' ' * gap, style='dim')
     body.append(now_str, style='dim')
 
-    title_col = 'bright_green' if ses_pct >= 0 else 'bright_red'
     title = (
-        f'[bold bright_green]BALANCE CHART[/]  '
-        f'[{title_col}]{ses_pct:+.3f}%[/]  '
-        f'[dim]Hi ${hi:,.2f}   Lo ${lo:,.2f}[/dim]'
+        f'[bold {TEAL}]◆ ATLAS · BALANCE[/]  '
+        f'[{_pcol(ses_pct)}]{ses_pct:+.3f}%[/]  '
+        f'[{FAINT}]Hi [/][{TEAL}]${hi:,.2f}[/]   [{FAINT}]Lo [/][{PINK}]${lo:,.2f}[/]'
     )
-    return Panel(body, title=title, border_style='green', expand=True)
+    return Panel(body, title=title, border_style='#123a33', expand=True)
 
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 def _footer() -> Rule:
     mode = 'POLY' if POLY_MODE else 'BINANCE'
     return Rule(
-        f'[dim]  [bold white]Q[/] Quit   '
-        f'[bold white]R[/] Restart Bot   '
-        f'[bold white]B[/] Browser   '
-        f'[bold white]P[/] Pause/Resume   '
-        f'|  {mode}   ws://127.0.0.1:{"8766" if POLY_MODE else "8765"}[/]',
-        style='bright_black',
+        f'[{FAINT}]  [bold {TEAL}]Q[/] Quit   '
+        f'[bold {VIOLET}]R[/] Restart   '
+        f'[bold {AMBER}]B[/] Browser   '
+        f'[bold {CYAN2}]P[/] Pause   '
+        f'│  [bold {TEAL}]{mode}[/]  ws://127.0.0.1:{"8766" if POLY_MODE else "8765"}  [{TEAL}]●[/][/]',
+        style='#123a33',
     )
 
 # ─── Layout builder ───────────────────────────────────────────────────────────
@@ -878,7 +905,7 @@ def _build(S: dict, frame: int) -> Layout:
         Layout(name='header',    size=5),
         Layout(name='body'),
         Layout(name='bal_chart', size=9),   # full-width balance line chart
-        Layout(name='trades',    size=10),
+        Layout(name='trades',    size=9),   # ATLAS trade card grid
         Layout(name='footer',    size=1),
     )
     layout['body'].split_row(
@@ -888,12 +915,14 @@ def _build(S: dict, frame: int) -> Layout:
     )
     layout['body']['right_col'].split_column(
         Layout(name='gauges', size=5),
-        Layout(name='market', ratio=1),     # market fills all freed space
+        Layout(name='stats',  size=11),     # trade analytics — profit factor, expectancy
+        Layout(name='market', ratio=1),     # market fills remaining space
     )
     layout['header'].update(_header(S))
     layout['body']['positions'].update(_positions(S))
     layout['body']['scanner'].update(_scanner(S, frame))
     layout['body']['right_col']['gauges'].update(_gauges(S))
+    layout['body']['right_col']['stats'].update(_stats(S))
     layout['body']['right_col']['market'].update(_market(S, frame))
     layout['bal_chart'].update(_balance_chart(S))
     layout['trades'].update(_trades(S))

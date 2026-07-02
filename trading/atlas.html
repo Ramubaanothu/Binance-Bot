@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ATLAS — AlphaBot Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  @keyframes top-sweep { 0%,100% { background-position:0% 50%; } 50% { background-position:100% 50%; } }
+  @keyframes dot-beat  { 0%,100% { transform:scale(1); opacity:1; box-shadow:0 0 0 0 rgba(0,255,204,0.7); } 50% { transform:scale(1.3); opacity:0.8; box-shadow:0 0 0 6px rgba(0,255,204,0); } }
+  @keyframes fade-up   { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes sig-in    { from { opacity:0; transform:translateX(-10px); background:rgba(0,255,204,0.08); } to { opacity:1; transform:translateX(0); background:transparent; } }
+  @keyframes strength-fill { from { width:0%; } }
+  @keyframes ping      { 0% { transform:scale(1); opacity:1; } 70%,100% { transform:scale(2.2); opacity:0; } }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#04040a; overflow:hidden; font-family:'DM Sans',sans-serif; color:#3a3a5a; }
+  ::-webkit-scrollbar { width:2px; height:2px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:rgba(0,255,204,0.2); }
+
+  .app { height:100vh; display:flex; flex-direction:column; position:relative; overflow:hidden; }
+  .sweep { height:2px; flex-shrink:0; background:linear-gradient(90deg,transparent,#00ffcc,#7000ff,#ff0080,#00ffcc,transparent); background-size:200% 100%; animation:top-sweep 6s ease infinite; }
+
+  /* status bar */
+  .statusbar { display:flex; align-items:center; padding:0 18px; height:36px; background:rgba(4,4,14,0.98); border-bottom:1px solid rgba(0,255,204,0.07); flex-shrink:0; position:relative; z-index:10; font-size:10px; }
+  .beat { width:7px; height:7px; border-radius:50%; background:#00ffcc; animation:dot-beat 2s ease-in-out infinite; flex-shrink:0; }
+  .beat.dead { background:#ff0080; box-shadow:none; animation:none; }
+  .vdiv { width:1px; height:16px; background:rgba(0,255,204,0.1); margin:0 18px; flex-shrink:0; }
+
+  .main { flex:1; display:flex; min-height:0; overflow:hidden; }
+  .left { width:36%; display:flex; flex-direction:column; border-right:1px solid rgba(0,255,204,0.07); background:rgba(6,6,18,0.96); overflow:hidden; }
+  .chartwrap { flex:1; position:relative; overflow:hidden; background:#02020a; }
+  .chartwrap canvas { position:absolute; top:0; left:0; width:100%; height:100%; display:block; }
+
+  .poscard { border:1px solid rgba(0,255,204,0.08); padding:12px 14px; position:relative; animation:fade-up 0.5s ease; }
+  .poscard:hover { background:rgba(0,255,204,0.03); }
+
+  .sigcard { flex-shrink:0; width:190px; height:70px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; animation:sig-in 0.45s ease-out; position:relative; overflow:hidden; }
+
+  .tradecell { padding:8px 12px; border-right:1px solid rgba(255,0,128,0.05); transition:background 0.15s; overflow:hidden; }
+  .tradecell:hover { background:rgba(255,0,128,0.04); }
+
+  .mono { font-family:'JetBrains Mono',monospace; }
+  .bebas { font-family:'Bebas Neue',sans-serif; }
+  .lbl { color:#1a1a3a; font-size:8px; letter-spacing:0.16em; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sweep"></div>
+
+  <!-- ══ STATUS BAR ══ -->
+  <div class="statusbar">
+    <div style="display:flex; align-items:center; gap:7px; flex-shrink:0; margin-right:22px">
+      <div class="beat" id="conn-dot"></div>
+      <span style="color:#00ffcc; font-weight:700; font-size:12px; letter-spacing:0.22em">ATLAS</span>
+      <span style="color:#1a1a3a; font-size:9px" id="mode-badge">v5.0</span>
+    </div>
+    <div class="vdiv" style="margin-left:0"></div>
+    <div style="display:flex; align-items:baseline; gap:4px; flex-shrink:0; margin-right:18px">
+      <span class="lbl" style="font-size:8px">BAL</span>
+      <span class="bebas" style="color:#e0e0ff; font-size:14px; letter-spacing:0.05em" id="sb-bal">$—</span>
+    </div>
+    <div style="display:flex; gap:16px; flex-shrink:0">
+      <span>DAY <span style="font-weight:600" id="sb-day">—</span></span>
+      <span>TOTAL <span style="font-weight:600" id="sb-total">—</span></span>
+      <span>SESSION <span style="font-weight:600" id="sb-sess">—</span></span>
+    </div>
+    <div class="vdiv"></div>
+    <div style="display:flex; gap:14px; flex-shrink:0">
+      <span>WR <span style="color:#f59e0b; font-weight:600" id="sb-wr">—</span></span>
+      <span id="sb-wl">0W / 0L</span>
+      <span>POS <span style="color:#00ffcc; font-weight:600" id="sb-pos">0</span></span>
+      <span>SCAN <span style="color:#7000ff; font-weight:600" id="sb-scan">#0</span></span>
+    </div>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:10px; flex-shrink:0">
+      <span style="color:#06b6d4" id="sb-session">— SESSION</span>
+      <div style="width:1px; height:14px; background:rgba(0,255,204,0.1)"></div>
+      <span class="bebas" style="color:#00ffcc; font-size:13px; letter-spacing:0.2em" id="sb-time">--:--:-- UTC</span>
+    </div>
+  </div>
+
+  <!-- ══ MAIN ══ -->
+  <div class="main">
+    <!-- LEFT -->
+    <div class="left">
+      <!-- Balance hero -->
+      <div style="padding:12px 18px 10px; border-bottom:1px solid rgba(0,255,204,0.06); flex-shrink:0; background:rgba(0,255,204,0.015)">
+        <div class="lbl" style="letter-spacing:0.18em; margin-bottom:2px">ACCOUNT BALANCE</div>
+        <div class="bebas" style="font-size:54px; letter-spacing:0.03em; line-height:1; color:#e8e8ff"><span style="color:#00ffcc">$</span><span id="hero-int">—</span><span style="color:#2a2a6a; font-size:40px" id="hero-dec">.00</span></div>
+        <div style="display:flex; gap:18px; margin-top:10px">
+          <div><div style="font-size:14px; font-weight:700; line-height:1" id="hero-day">—</div><div class="lbl" style="font-size:7px; margin-top:2px">DAY P&amp;L</div></div>
+          <div style="width:1px; background:rgba(0,255,204,0.08)"></div>
+          <div><div style="font-size:14px; font-weight:700; line-height:1" id="hero-total">—</div><div class="lbl" style="font-size:7px; margin-top:2px">TOTAL P&amp;L</div></div>
+          <div style="width:1px; background:rgba(0,255,204,0.08)"></div>
+          <div><div style="font-size:14px; font-weight:700; line-height:1" id="hero-sess">—</div><div class="lbl" style="font-size:7px; margin-top:2px">SESSION</div></div>
+        </div>
+      </div>
+
+      <!-- Positions header -->
+      <div style="display:flex; align-items:center; gap:8px; padding:7px 20px; border-bottom:1px solid rgba(0,255,204,0.05); flex-shrink:0">
+        <span style="color:#00ffcc; font-size:9px; font-weight:700; letter-spacing:0.18em">POSITIONS</span>
+        <span style="color:#00ffcc; font-size:9px; background:rgba(0,255,204,0.08); padding:1px 6px" id="pos-count">0/5</span>
+        <span style="color:#00ffcc; font-size:9px" id="pos-long">0L</span>
+        <span style="color:#ff0080; font-size:9px" id="pos-short">0S</span>
+        <span style="margin-left:auto; font-size:9px; font-weight:600" id="pos-pnl">+0.00$</span>
+      </div>
+      <div style="flex:1; overflow-y:auto; padding:8px 14px; display:flex; flex-direction:column; gap:8px" id="pos-list">
+        <div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions</div>
+      </div>
+
+      <!-- Gauges -->
+      <div style="padding:10px 20px 12px; border-top:1px solid rgba(0,255,204,0.06); flex-shrink:0">
+        <div class="lbl" style="margin-bottom:8px">GAUGES</div>
+        <div id="gauges"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: CHART -->
+    <div class="chartwrap">
+      <canvas id="chart"></canvas>
+      <div style="position:absolute; top:10px; right:14px; display:flex; gap:12px; font-size:9px; z-index:2" id="mkt-info">
+        <span style="color:#1a1a3a">1H: <span id="mi-1h" style="color:#f59e0b">—</span></span>
+        <span style="color:#1a1a3a">4H: <span id="mi-4h" style="color:#f59e0b">—</span></span>
+        <span style="color:#1a1a3a">DAILY: <span id="mi-1d" style="color:#00ffcc; font-weight:600">—</span></span>
+        <span style="color:#1a1a3a">BTC 10m: <span id="mi-btc" style="color:#3a3a6a">—</span></span>
+        <span style="color:#1a1a3a">F&amp;G: <span id="mi-fng" style="color:#f59e0b">—</span></span>
+      </div>
+      <div style="position:absolute; bottom:10px; left:14px; display:flex; gap:16px; font-size:9px; z-index:2">
+        <span style="color:#1a1a3a">Hi <span style="color:#00ffcc" id="chart-hi">—</span></span>
+        <span style="color:#1a1a3a">Lo <span style="color:#ff0080" id="chart-lo">—</span></span>
+        <span style="color:#1a1a3a" id="chart-sess">Session +0.00%</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ SIGNAL FEED ══ -->
+  <div style="height:88px; border-top:1px solid rgba(0,255,204,0.1); background:rgba(3,3,12,0.98); flex-shrink:0; display:flex; overflow:hidden; position:relative">
+    <div style="width:82px; flex-shrink:0; border-right:1px solid rgba(0,255,204,0.07); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 10px; background:rgba(0,255,204,0.02)">
+      <div style="position:relative; display:flex; align-items:center; justify-content:center">
+        <div class="beat" style="animation-duration:1.8s; position:relative; z-index:1; width:8px; height:8px"></div>
+        <div style="position:absolute; width:8px; height:8px; border-radius:50%; background:#00ffcc; animation:ping 1.8s ease-out infinite"></div>
+      </div>
+      <span style="color:#00ffcc; font-size:8px; font-weight:700; letter-spacing:0.2em; text-align:center; line-height:1.3">SIGNAL<br>FEED</span>
+      <span class="mono" style="color:#1a1a3a; font-size:8px" id="feed-scan">#0</span>
+    </div>
+    <div style="flex:1; overflow:hidden; display:flex; align-items:center; padding:0 8px; gap:6px" id="sig-cards"></div>
+    <div style="width:80px; flex-shrink:0; border-left:1px solid rgba(0,255,204,0.07); display:flex; flex-direction:column; justify-content:center; gap:8px; padding:0 12px; background:rgba(0,255,204,0.01)">
+      <div><div class="lbl" style="font-size:7px">SIGNALS</div><div class="bebas" style="color:#00ffcc; font-size:16px; line-height:1" id="cnt-sig">0</div></div>
+      <div><div class="lbl" style="font-size:7px">FILTERS</div><div class="bebas" style="color:#f59e0b; font-size:16px; line-height:1" id="cnt-fil">0</div></div>
+      <div><div class="lbl" style="font-size:7px">ALERTS</div><div class="bebas" style="color:#ff0080; font-size:16px; line-height:1" id="cnt-alr">0</div></div>
+    </div>
+  </div>
+
+  <!-- ══ TRADES ══ -->
+  <div style="height:108px; border-top:1px solid rgba(255,0,128,0.08); background:rgba(4,4,10,0.98); flex-shrink:0; overflow:hidden">
+    <div style="display:flex; align-items:center; gap:10px; padding:4px 18px 3px; border-bottom:1px solid rgba(255,0,128,0.06); font-size:9px">
+      <span style="color:#ff0080; font-weight:700; letter-spacing:0.18em">TRADES</span>
+      <span style="color:#1a1a3a" id="tr-wl">0W / 0L</span>
+      <span style="color:#f59e0b" id="tr-wr">WR 0%</span>
+      <span id="tr-total">Total +0.00$</span>
+      <span style="color:#1a1a3a" id="tr-pf">PF —</span>
+      <span style="color:#1a1a3a" id="tr-avg">AvgW — / AvgL —</span>
+    </div>
+    <div style="display:grid; grid-template-columns:repeat(6,1fr); height:calc(100% - 24px)" id="trade-grid"></div>
+  </div>
+
+  <!-- ══ FOOTER ══ -->
+  <div style="display:flex; align-items:center; padding:0 18px; height:24px; background:rgba(2,2,8,0.99); border-top:1px solid rgba(0,255,204,0.05); flex-shrink:0; font-size:8.5px; color:#1a1a3a; gap:14px">
+    <span id="ft-status">CONNECTING…</span>
+    <span id="ft-pause"></span>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
+      <span style="color:#00ffcc; font-weight:700; letter-spacing:0.1em" id="ft-exch">BINANCE</span>
+      <span>ws://localhost:8765</span>
+      <div class="beat" style="width:5px; height:5px; border-radius:0; animation-duration:3s" id="ft-dot"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const TEAL='#00ffcc', PINK='#ff0080', VIOLET='#7000ff', AMBER='#f59e0b', CYAN='#06b6d4';
+const $ = id => document.getElementById(id);
+const pnlCol = v => v >= 0 ? TEAL : PINK;
+const fsign  = (v,d=2) => (v>=0?'+':'')+Number(v).toFixed(d);
+const fprice = v => v < 10 ? Number(v).toPrecision(5) : Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+let S = null;                    // latest bot state
+let balHist = [];                // [{t, v}] balance history (persisted)
+let posHist = {};                // symbol -> [pnl_pct...] sparkline history
+let startBal = 0;
+
+// ── Load persisted balance history ────────────────────────────────────────────
+try {
+  const saved = JSON.parse(localStorage.getItem('atlas_balhist') || '[]');
+  const cutoff = Date.now() - 24*3600*1000;
+  balHist = saved.filter(p => p.t > cutoff);
+} catch(e) {}
+
+// ── Clock ─────────────────────────────────────────────────────────────────────
+setInterval(() => {
+  const d = new Date();
+  const p = n => String(n).padStart(2,'0');
+  $('sb-time').textContent = `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}, 1000);
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let ws = null;
+function connect() {
+  ws = new WebSocket('ws://localhost:8765');
+  ws.onopen = () => {
+    $('conn-dot').classList.remove('dead');
+    $('ft-dot').classList.remove('dead');
+    $('ft-status').innerHTML = '<span style="color:#00ffcc">● CONNECTED</span>';
+  };
+  ws.onmessage = ev => {
+    try {
+      const d = JSON.parse(ev.data);
+      if (d.type === 'state') { S = d; onState(); }
+    } catch(e) {}
+  };
+  ws.onclose = () => {
+    $('conn-dot').classList.add('dead');
+    $('ft-dot').classList.add('dead');
+    $('ft-status').innerHTML = '<span style="color:#ff0080">● DISCONNECTED — retrying…</span>';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+connect();
+
+// ── State handler ─────────────────────────────────────────────────────────────
+function onState() {
+  const bal = S.balance || 0;
+  startBal = S.start_bal || startBal || bal;
+
+  // balance history: append when changed or every 10s
+  const last = balHist[balHist.length-1];
+  if (!last || Math.abs(bal - last.v) > 0.005 || Date.now() - last.t > 10000) {
+    balHist.push({ t: Date.now(), v: bal });
+    if (balHist.length > 1500) balHist = balHist.slice(-1500);
+    try { localStorage.setItem('atlas_balhist', JSON.stringify(balHist)); } catch(e) {}
+  }
+
+  renderStatus(); renderHero(); renderPositions(); renderGauges();
+  renderMarket(); renderSignals(); renderTrades(); renderFooter();
+  drawChart();
+}
+
+function renderStatus() {
+  const sessPct = startBal ? ((S.balance/startBal)-1)*100 : 0;
+  $('sb-bal').textContent = '$' + S.balance.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const day = $('sb-day'); day.textContent = fsign(S.daily_pnl); day.style.color = pnlCol(S.daily_pnl);
+  const tot = $('sb-total'); tot.textContent = fsign(S.total_pnl); tot.style.color = pnlCol(S.total_pnl);
+  const se = $('sb-sess'); se.textContent = fsign(sessPct,3)+'%'; se.style.color = pnlCol(sessPct);
+  $('sb-wr').textContent = (S.win_rate||0) + '%';
+  $('sb-wl').textContent = `${S.wins||0}W / ${S.losses||0}L`;
+  $('sb-pos').textContent = (S.positions||[]).length;
+  $('sb-scan').textContent = '#' + (S.scan_count||0);
+  $('sb-session').textContent = (S.session||'—').toUpperCase() + ' SESSION';
+  $('mode-badge').textContent = S.paper_mode ? 'PAPER' : 'v5.0';
+  $('mode-badge').style.color = S.paper_mode ? AMBER : '#1a1a3a';
+}
+
+function renderHero() {
+  const [i, d] = S.balance.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}).split('.');
+  $('hero-int').textContent = i; $('hero-dec').textContent = '.' + d;
+  const sessPct = startBal ? ((S.balance/startBal)-1)*100 : 0;
+  const hd = $('hero-day'); hd.textContent = fsign(S.daily_pnl); hd.style.color = pnlCol(S.daily_pnl);
+  const ht = $('hero-total'); ht.textContent = fsign(S.total_pnl); ht.style.color = pnlCol(S.total_pnl);
+  const hs = $('hero-sess'); hs.textContent = fsign(sessPct,3)+'%'; hs.style.color = pnlCol(sessPct);
+}
+
+function sparkPath(hist) {
+  if (!hist || hist.length < 2) return 'M0,6 L100,6';
+  const min = Math.min(...hist), max = Math.max(...hist), range = (max-min)||1;
+  return 'M ' + hist.map((v,i)=>`${(i/(hist.length-1))*100} ${12-((v-min)/range)*9.6-1.2}`).join(' L ');
+}
+
+function renderPositions() {
+  const ps = S.positions || [];
+  const longs = ps.filter(p=>p.direction==='long').length;
+  $('pos-count').textContent = `${ps.length}/5`;
+  $('pos-long').textContent  = longs + 'L';
+  $('pos-short').textContent = (ps.length-longs) + 'S';
+  const tot = ps.reduce((a,p)=>a+(p.pnl_usd||0),0);
+  const pp = $('pos-pnl'); pp.textContent = fsign(tot)+'$'; pp.style.color = pnlCol(tot);
+
+  // sparkline history
+  const seen = new Set();
+  ps.forEach(p => {
+    seen.add(p.symbol);
+    (posHist[p.symbol] = posHist[p.symbol] || []).push(p.pnl_pct||0);
+    if (posHist[p.symbol].length > 28) posHist[p.symbol] = posHist[p.symbol].slice(-28);
+  });
+  Object.keys(posHist).forEach(s => { if (!seen.has(s)) delete posHist[s]; });
+
+  if (!ps.length) {
+    $('pos-list').innerHTML = '<div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions — scanning…</div>';
+    return;
+  }
+  $('pos-list').innerHTML = ps.map(p => {
+    const c = pnlCol(p.pnl_pct||0), dc = p.direction==='long'?TEAL:PINK;
+    return `<div class="poscard" style="border-top:2px solid ${c}">
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:8px">
+        <div>
+          <div style="color:#c0c0e8; font-size:13px; font-weight:700; letter-spacing:0.02em">${p.symbol}</div>
+          <div style="display:flex; align-items:center; gap:6px; margin-top:3px">
+            <span style="color:${dc}; font-size:10px; font-weight:700">${p.direction==='long'?'▲ L':'▼ S'}</span>
+            <span style="color:#1a1a3a; font-size:9px">${p.leverage||10}x</span>
+            <span style="color:#7000ff; font-size:8px; background:rgba(112,0,255,0.1); padding:1px 5px">${(p.phase||'open').toUpperCase()}</span>
+            <span style="color:#2a2a4a; font-size:8px">conf ${Math.round(p.conf||0)}%</span>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div class="bebas" style="font-size:32px; line-height:1; color:${c}; letter-spacing:0.02em">${fsign(p.pnl_pct||0)}%</div>
+          <div style="color:${pnlCol(p.pnl_usd||0)}; font-size:12px; font-weight:600; margin-top:1px">${fsign(p.pnl_usd||0)}$</div>
+        </div>
+      </div>
+      <svg viewBox="0 0 100 12" style="width:100%; height:12px; display:block; overflow:visible; margin-bottom:6px" preserveAspectRatio="none">
+        <path d="${sparkPath(posHist[p.symbol])}" fill="none" stroke="${c}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"></path>
+      </svg>
+      <div class="mono" style="display:flex; justify-content:space-between; font-size:9px; color:#1a1a3a">
+        <span>Entry ${fprice(p.entry)}</span><span>SL ${fprice(p.sl)}</span><span>TP1 ${fprice(p.tp1)}</span><span>→</span>
+        <span style="color:#4a4a7a">${fprice(p.current)}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderGauges() {
+  const dd = S.max_dd || 0;
+  const bars = [
+    { label:'WIN RATE', val:(S.win_rate||0)+'%', w:Math.min(100,S.win_rate||0), color:TEAL },
+    { label:'F&G',      val:S.fear_greed??'—',   w:S.fear_greed||0,            color:AMBER },
+    { label:'DRAWDOWN', val:dd.toFixed(1)+'%',   w:Math.min(100,dd*3),          color:PINK },
+    { label:'BTC RSI',  val:Math.round(S.btc_rsi||50), w:S.btc_rsi||50,         color:VIOLET },
+  ];
+  $('gauges').innerHTML = bars.map(g => `
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
+      <span style="color:#2a2a4a; font-size:8px; width:62px; flex-shrink:0; letter-spacing:0.05em">${g.label}</span>
+      <div style="flex:1; height:3px; background:rgba(255,255,255,0.04)">
+        <div style="height:100%; background:${g.color}; transition:width 1s ease; box-shadow:0 0 5px ${g.color}; width:${g.w}%"></div>
+      </div>
+      <span class="mono" style="color:${g.color}; font-size:9px; font-weight:600; width:30px; text-align:right; flex-shrink:0">${g.val}</span>
+    </div>`).join('');
+}
+
+function trendSpan(t, isBool) {
+  if (isBool) return t ? `<span style="color:${TEAL}; font-weight:600">BULL</span>` : `<span style="color:${PINK}; font-weight:600">BEAR</span>`;
+  const c = t==='bull' ? TEAL : (t==='bear' ? PINK : AMBER);
+  return `<span style="color:${c}; font-weight:600">${(t||'—').toUpperCase()}</span>`;
+}
+
+function renderMarket() {
+  $('mi-1h').outerHTML = `<span id="mi-1h">${trendSpan(S.btc_trend)}</span>`;
+  $('mi-4h').outerHTML = `<span id="mi-4h">${trendSpan(S.btc_4h_trend)}</span>`;
+  $('mi-1d').outerHTML = `<span id="mi-1d">${trendSpan(S.btc_daily_bull, true)}</span>`;
+  const m = S.btc_5m_mom || 0;
+  $('mi-btc').textContent = fsign(m)+'%'; $('mi-btc').style.color = m>=0 ? TEAL : PINK;
+  $('mi-fng').textContent = S.fear_greed ?? '—';
+}
+
+const LOG_MAP = {
+  pass:{c:TEAL,  bg:'rgba(0,255,204,0.1)',   b:'rgba(0,255,204,0.12)',  cbg:'rgba(0,255,204,0.025)',  lbl:'SIGNAL'},
+  exec:{c:TEAL,  bg:'rgba(0,255,204,0.14)',  b:'rgba(0,255,204,0.25)',  cbg:'rgba(0,255,204,0.05)',   lbl:'EXECUTED'},
+  fail:{c:AMBER, bg:'rgba(245,158,11,0.1)',  b:'rgba(245,158,11,0.12)', cbg:'rgba(245,158,11,0.02)',  lbl:'FILTER'},
+  warn:{c:PINK,  bg:'rgba(255,0,128,0.1)',   b:'rgba(255,0,128,0.12)',  cbg:'rgba(255,0,128,0.025)',  lbl:'ALERT'},
+  exit:{c:PINK,  bg:'rgba(255,0,128,0.12)',  b:'rgba(255,0,128,0.2)',   cbg:'rgba(255,0,128,0.04)',   lbl:'EXIT'},
+  info:{c:VIOLET,bg:'rgba(112,0,255,0.1)',   b:'rgba(112,0,255,0.12)',  cbg:'rgba(112,0,255,0.02)',   lbl:'INFO'},
+  scan:{c:CYAN,  bg:'rgba(6,182,212,0.1)',   b:'rgba(6,182,212,0.12)',  cbg:'rgba(6,182,212,0.02)',   lbl:'SCAN'},
+};
+
+function renderSignals() {
+  const logs = S.log || [];   // newest first
+  $('feed-scan').textContent = '#' + (S.scan_count||0);
+  $('cnt-sig').textContent = logs.filter(l=>l.type==='pass'||l.type==='exec').length;
+  $('cnt-fil').textContent = logs.filter(l=>l.type==='fail').length;
+  $('cnt-alr').textContent = logs.filter(l=>l.type==='warn'||l.type==='exit').length;
+
+  const cards = logs.slice(0, 7).map(l => {
+    const m = LOG_MAP[l.type] || LOG_MAP.info;
+    const msg = l.msg || '';
+    const symMatch = msg.match(/\b([A-Z0-9]{2,20}USDT)\b/);
+    const confMatch = msg.match(/(\d{1,3})%/);
+    const conf = confMatch ? Math.min(99, +confMatch[1]) : null;
+    const isLong = /LONG|▲/i.test(msg), isShort = /SHORT|▼/i.test(msg);
+    const dirSym = isLong ? '▲' : (isShort ? '▼' : '');
+    const dirCol = isLong ? TEAL : PINK;
+    const strength = conf !== null ? Math.max(1, Math.min(10, Math.round(conf/10))) : 5;
+    const shortMsg = msg.length > 26 ? msg.slice(0, 26)+'…' : msg;
+    return `<div class="sigcard" style="border:1px solid ${m.b}; border-top:2px solid ${m.c}; background:${m.cbg}">
+      <div style="position:absolute; top:0; right:0; width:40px; height:40px; background:radial-gradient(circle at top right, ${m.c}, transparent 70%); opacity:0.12; pointer-events:none"></div>
+      <div style="display:flex; align-items:center; justify-content:space-between">
+        <span style="color:${m.c}; font-size:7.5px; font-weight:700; letter-spacing:0.14em; background:${m.bg}; padding:1px 6px">${m.lbl}</span>
+        <span class="mono" style="color:#1a1a3a; font-size:8px">${l.ts||''}</span>
+      </div>
+      <div style="display:flex; align-items:center; justify-content:space-between">
+        <div style="display:flex; align-items:center; gap:5px">
+          <span style="color:#c0c0e8; font-size:11px; font-weight:700">${symMatch ? symMatch[1] : '—'}</span>
+          ${dirSym ? `<span style="color:${dirCol}; font-size:13px; font-weight:700; line-height:1">${dirSym}</span>` : ''}
+        </div>
+        ${conf !== null ? `<span class="bebas" style="color:${m.c}; font-size:12px; font-weight:700; letter-spacing:0.05em">${conf}%</span>` : ''}
+      </div>
+      <div>
+        <div style="height:3px; background:rgba(255,255,255,0.05); overflow:hidden">
+          <div style="height:100%; background:${m.c}; width:${strength*10}%; animation:strength-fill 0.8s ease-out; box-shadow:0 0 6px ${m.c}; opacity:0.85"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-top:3px">
+          <span class="mono" style="color:#1a1a3a; font-size:7.5px" title="${msg.replace(/"/g,'&quot;')}">${shortMsg}</span>
+          <span class="mono" style="color:#2a2a4a; font-size:7.5px">STR ${strength}/10</span>
+        </div>
+      </div>
+    </div>`;
+  });
+  $('sig-cards').innerHTML = cards.join('');
+}
+
+function renderTrades() {
+  const trades = (S.trades || []).slice(-6).reverse();
+  $('tr-wl').textContent = `${S.wins||0}W / ${S.losses||0}L`;
+  $('tr-wr').textContent = `WR ${S.win_rate||0}%`;
+  const tt = $('tr-total'); tt.textContent = `Total ${fsign(S.total_pnl)}$`; tt.style.color = pnlCol(S.total_pnl);
+
+  const winU  = (S.trades||[]).filter(t=>t.is_win).reduce((a,t)=>a+t.pnl_usd,0);
+  const lossU = Math.abs((S.trades||[]).filter(t=>!t.is_win).reduce((a,t)=>a+t.pnl_usd,0));
+  const pf = lossU > 0 ? (winU/lossU).toFixed(2) : (winU > 0 ? '∞' : '—');
+  $('tr-pf').textContent = `PF ${pf}`;
+  $('tr-avg').textContent = `AvgW ${fsign(S.avg_win||0)}% / AvgL ${fsign(S.avg_loss||0)}%`;
+
+  $('trade-grid').innerHTML = trades.map(t => {
+    const rc = t.is_win ? TEAL : PINK;
+    const dc = t.direction==='long' ? TEAL : PINK;
+    return `<div class="tradecell" style="border-top:2px solid ${rc}">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px">
+        <span style="color:${dc}; font-size:12px; font-weight:700">${t.direction==='long'?'▲':'▼'}</span>
+        <span class="mono" style="color:#1a1a3a; font-size:8px">${t.close_time||''}</span>
+      </div>
+      <div style="color:#b0b0d8; font-size:10px; font-weight:700; margin-bottom:2px">${t.symbol}</div>
+      <div class="bebas" style="font-size:18px; color:${pnlCol(t.pnl_pct)}; line-height:1; margin-bottom:2px">${fsign(t.pnl_pct)}%</div>
+      <div style="color:${rc}; font-size:7.5px; font-weight:700; letter-spacing:0.1em">${t.is_win?'WIN':'LOSS'} · ${(t.reason||'').slice(0,14)}</div>
+      <div class="mono" style="color:#1a1a3a; font-size:8px; margin-top:1px">${fsign(t.pnl_usd)}$</div>
+    </div>`;
+  }).join('') || '<div style="grid-column:1/-1; color:#1a1a3a; font-size:10px; text-align:center; align-self:center">No closed trades yet</div>';
+}
+
+function renderFooter() {
+  $('ft-pause').innerHTML = S.paused
+    ? `<span style="color:${AMBER}">⏸ PAUSED — ${S.pause_reason||''}</span>` : '';
+  $('ft-exch').textContent = S.paper_mode ? 'BINANCE · PAPER' : 'BINANCE · TESTNET';
+}
+
+// ── Canvas chart ──────────────────────────────────────────────────────────────
+const canvas = $('chart');
+function resizeCanvas() {
+  const w = canvas.offsetWidth, h = canvas.offsetHeight;
+  if (w > 0 && h > 0) { canvas.width = w; canvas.height = h; drawChart(); }
+}
+window.addEventListener('resize', resizeCanvas);
+setTimeout(resizeCanvas, 150);
+
+function drawChart() {
+  if (!canvas.width) resizeCanvas();
+  const ctx = canvas.getContext('2d');
+  const bh = balHist;
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (bh.length < 2) return;
+
+  const ac = a => `rgba(0,255,204,${a})`;
+
+  // grid
+  ctx.strokeStyle = ac(0.04); ctx.lineWidth = 1; ctx.setLineDash([2,10]);
+  for (let i=1;i<=4;i++){ctx.beginPath();ctx.moveTo(0,H*i/5);ctx.lineTo(W,H*i/5);ctx.stroke();}
+  for (let i=1;i<=5;i++){ctx.beginPath();ctx.moveTo(W*i/5,0);ctx.lineTo(W*i/5,H);ctx.stroke();}
+  ctx.setLineDash([]);
+
+  const vals = bh.map(h=>h.v);
+  const minV = Math.min(...vals)*0.9995, maxV = Math.max(...vals)*1.0005;
+  const range = (maxV-minV)||1, n = bh.length;
+  const tx = i => (i/(n-1))*W;
+  const ty = v => H - ((v-minV)/range)*(H*0.88) - H*0.06;
+
+  // y labels
+  ctx.fillStyle = ac(0.25); ctx.font = '9px "JetBrains Mono", monospace'; ctx.textAlign = 'left';
+  for (let i=0;i<=4;i++){ const v = minV+range*i/4; ctx.fillText('$'+v.toLocaleString('en-US',{maximumFractionDigits:2}), 8, ty(v)-3); }
+
+  // start balance ref line
+  if (startBal && minV <= startBal && maxV >= startBal) {
+    const refY = ty(startBal);
+    ctx.beginPath(); ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+    ctx.setLineDash([6,8]); ctx.moveTo(0,refY); ctx.lineTo(W,refY); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle='rgba(255,255,255,0.15)'; ctx.font='8px "JetBrains Mono",monospace';
+    ctx.fillText('START $'+startBal.toLocaleString('en-US',{maximumFractionDigits:2}), 8, refY-4);
+  }
+
+  const curve = () => {
+    ctx.moveTo(tx(0), ty(bh[0].v));
+    for (let i=1;i<n;i++){
+      const x0=tx(i-1),y0=ty(bh[i-1].v),x1=tx(i),y1=ty(bh[i].v);
+      ctx.bezierCurveTo((x0+x1)/2,y0,(x0+x1)/2,y1,x1,y1);
+    }
+  };
+
+  // area fill
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0, ac(0.18)); grad.addColorStop(0.6, ac(0.04)); grad.addColorStop(1, ac(0));
+  ctx.beginPath(); curve(); ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  // line with glow
+  ctx.beginPath(); curve();
+  ctx.strokeStyle = TEAL; ctx.lineWidth = 1.8;
+  ctx.shadowBlur = 12; ctx.shadowColor = ac(0.8);
+  ctx.stroke(); ctx.shadowBlur = 0;
+
+  // live dot
+  const lx = tx(n-1), ly = ty(bh[n-1].v);
+  const dg = ctx.createRadialGradient(lx,ly,0,lx,ly,20);
+  dg.addColorStop(0, ac(0.5)); dg.addColorStop(1, ac(0));
+  ctx.beginPath(); ctx.arc(lx,ly,20,0,Math.PI*2); ctx.fillStyle=dg; ctx.fill();
+  ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2);
+  ctx.fillStyle=TEAL; ctx.shadowBlur=14; ctx.shadowColor=ac(1); ctx.fill(); ctx.shadowBlur=0;
+  ctx.beginPath(); ctx.arc(lx,ly,2,0,Math.PI*2); ctx.fillStyle='#ffffff'; ctx.fill();
+  ctx.fillStyle=TEAL; ctx.font='bold 9px "DM Sans",sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText('◆ LIVE', Math.min(lx+12, W-46), ly);
+
+  // watermark
+  ctx.save(); ctx.font='bold 72px "Bebas Neue",sans-serif';
+  ctx.fillStyle=ac(0.02); ctx.textAlign='right'; ctx.textBaseline='bottom';
+  ctx.fillText('ATLAS', W-18, H-12); ctx.restore();
+
+  // hi/lo labels
+  $('chart-hi').textContent = '$'+Math.max(...vals).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  $('chart-lo').textContent = '$'+Math.min(...vals).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const sessPct = startBal ? ((bh[n-1].v/startBal)-1)*100 : 0;
+  $('chart-sess').textContent = 'Session ' + fsign(sessPct,3) + '%';
+}
+</script>
+</body>
+</html>
