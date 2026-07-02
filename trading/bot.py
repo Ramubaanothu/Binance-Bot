@@ -1019,7 +1019,14 @@ class AlphaBot:
 
         # ── Max-5 gate with swap-weakest logic ───────────────────────────────
         if len(self.positions) >= config.MAX_POSITIONS:
-            weakest_sym  = min(self.positions, key=lambda s: self.positions[s]['conf'])
+            # Only at-risk positions are swap candidates. Runners that banked TP1
+            # or BE-locked are risk-free lottery tickets — never sacrifice them
+            # for a fresh (risky) signal.
+            at_risk = [s for s, p in self.positions.items()
+                       if not p.get('tp1_hit') and not p.get('be_locked')]
+            if not at_risk:
+                return   # book is fully protected winners — let them run
+            weakest_sym  = min(at_risk, key=lambda s: self.positions[s]['conf'])
             weakest_conf = self.positions[weakest_sym]['conf']
             if a['confidence'] > weakest_conf + 10:
                 self.emit('info',
