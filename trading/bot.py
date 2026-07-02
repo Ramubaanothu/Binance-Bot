@@ -1785,7 +1785,20 @@ class AlphaBot:
             log.error(f"[ASYNCIO UNHANDLED] {exc}")
         asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
 
-        server = await websockets.serve(self.ws_handler, config.WS_HOST, config.WS_PORT)
+        # Bind the dashboard port patiently: after a restart Windows can hold the
+        # old socket for a few seconds — wait for it instead of crashing
+        server = None
+        for _attempt in range(30):
+            try:
+                server = await websockets.serve(self.ws_handler, config.WS_HOST, config.WS_PORT)
+                break
+            except OSError:
+                if _attempt == 0:
+                    log.info(f"[BOOT] Port {config.WS_PORT} still held by previous instance — waiting...")
+                await asyncio.sleep(1)
+        if server is None:
+            log.error(f"[BOOT] Port {config.WS_PORT} blocked for 30s — is another bot already running?")
+            raise SystemExit(1)
         # Real-time push streams from Binance (auto-reconnect, REST stays as fallback)
         asyncio.get_event_loop().create_task(self._mark_price_stream())
         asyncio.get_event_loop().create_task(self._user_data_stream())
