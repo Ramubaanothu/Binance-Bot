@@ -192,7 +192,7 @@ class Client:
             'quantity':    self._fmt_qty(qty),
             'stopPrice':   f"{stop_price:.8f}".rstrip('0').rstrip('.'),
             'closeOnly':   'true',
-            'workingType': 'CONTRACT_PRICE',
+            'workingType': 'MARK_PRICE',   # index-based — immune to single-exchange stop hunts
         }
         try:
             return self._post('/fapi/v1/order', p)
@@ -212,7 +212,7 @@ class Client:
             'quantity':    self._fmt_qty(qty),
             'stopPrice':   f"{stop_price:.8f}".rstrip('0').rstrip('.'),
             'closeOnly':   'true',
-            'workingType': 'CONTRACT_PRICE',
+            'workingType': 'MARK_PRICE',   # index-based — immune to single-exchange stop hunts
         }
         try:
             return self._post('/fapi/v1/order', p)
@@ -425,6 +425,7 @@ class AlphaBot:
         self._upd_busy = False                     # re-entry guard for live update loop
         self._blocked_signals: dict[str, float] = {}  # sym → ts: passed gates but no slot free
         self._retry_busy = False                   # re-entry guard for blocked-signal retry
+        self._vol24: dict[str, float] = {}         # sym → 24h quote volume (liquidity tiering)
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -1099,6 +1100,17 @@ class AlphaBot:
 
         if conf < min_conf:
             self.emit('fail', f"{sym} conf={conf}% < {min_conf:.0f}% → SKIP"); return
+        # ── Liquidity tier gate — small caps are easy to stop-hunt, so they need
+        #    stronger signals and can't dominate the book
+        vol24 = self._vol24.get(sym, 0.0)
+        if vol24 and vol24 < config.SMALLCAP_VOLUME_USDT and sym not in config.MAJOR_LEVERAGE:
+            n_small = sum(1 for s in self.positions
+                          if self._vol24.get(s, 0) and self._vol24[s] < config.SMALLCAP_VOLUME_USDT)
+            if n_small >= config.SMALLCAP_MAX_POSITIONS:
+                self.emit('fail', f"{sym} small-cap slots full ({n_small}/{config.SMALLCAP_MAX_POSITIONS}) → SKIP"); return
+            if conf < min_conf + config.SMALLCAP_EXTRA_CONF:
+                self.emit('fail', f"{sym} ${vol24/1e6:.0f}M vol small-cap needs "
+                                  f"{min_conf+config.SMALLCAP_EXTRA_CONF:.0f}%+ got {conf:.0f}% → SKIP"); return
         if self.sector_count(sym) >= config.MAX_CORRELATED_PAIRS:
             self.emit('fail', f"{sym} sector cap → SKIP"); return
         if a['atr_pct'] > 4.0:
@@ -1689,6 +1701,7 @@ class AlphaBot:
             try:
                 _tick = await asyncio.get_event_loop().run_in_executor(None, self.client.tickers_24h)
                 _prices = {t['symbol']: float(t['lastPrice']) for t in _tick if t.get('lastPrice')}
+                self._vol24 = {t['symbol']: float(t.get('quoteVolume', 0) or 0) for t in _tick}
             except Exception:
                 pass
 
