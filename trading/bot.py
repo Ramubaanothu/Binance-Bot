@@ -1516,14 +1516,17 @@ class AlphaBot:
         d    = pos['direction']
         sign = +1 if d == 'long' else -1
         try:
-            self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', part,
-                                     reduce=True, current_price=price)
+            resp = self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', part,
+                                            reduce=True, current_price=price)
         except Exception as e:
             self.emit('warn', f"TP1 scale-out fail {sym}: {e}")
             return
+        # Book P&L from the ACTUAL fill price, not the trigger price — on testnet
+        # mark and last can diverge and the difference was booked as phantom profit
+        fill_px    = float(resp.get('avgPrice') or 0) or price
         entry      = pos['entry']
         closed_usd = part * entry
-        pnl_usd    = sign * (price - entry) * part
+        pnl_usd    = sign * (fill_px - entry) * part
         self.total_pnl += pnl_usd
         self.daily_pnl += pnl_usd
         if config.PAPER_MODE:
@@ -1532,7 +1535,7 @@ class AlphaBot:
         pos['size_usd'] = round(pos['qty'] * entry, 4)
         self.balance = self.client.usdt_balance(self.paper_balance)
         self.emit('exec',
-            f"💰 TP1 BANKED {sym}: {frac*100:.0f}% closed @ {price:.6g} → "
+            f"💰 TP1 BANKED {sym}: {frac*100:.0f}% closed @ {fill_px:.6g} → "
             f"{pnl_usd:+.4f}$ | runner qty={pos['qty']} → TP2={pos['tp2']:.5g}")
 
     async def close(self, sym: str, pos: dict, pnl_pct: float, reason: str,
