@@ -1320,6 +1320,14 @@ class AlphaBot:
             (direction == 'short' and (a['rsi'] >= 70 or (_pats & BEAR_REVERSAL)))
         )
 
+        # ── Pattern-direction contradiction gate — don't LONG a topping candle.
+        # MANA was bought on a 'Tweezer Top' (bearish reversal). If the candles
+        # show a reversal pattern AGAINST the trade and none FOR it, skip.
+        if direction == 'long' and (_pats & BEAR_REVERSAL) and not (_pats & BULL_REVERSAL):
+            self.emit('fail', f"{sym} LONG but candle shows {', '.join(_pats & BEAR_REVERSAL)} (bearish) → SKIP"); return
+        if direction == 'short' and (_pats & BULL_REVERSAL) and not (_pats & BEAR_REVERSAL):
+            self.emit('fail', f"{sym} SHORT but candle shows {', '.join(_pats & BULL_REVERSAL)} (bullish) → SKIP"); return
+
         # ── Pro gate 6: R:R check — must be worth the risk ───────────────────
         # ── Venue price sanity — analysis uses REAL market data but orders fill
         # on the execution venue. If the venue's price diverges from the analysis
@@ -1757,8 +1765,9 @@ class AlphaBot:
         del self.positions[sym]
         self._save_positions()
         self._recently_closed[sym] = time.time()   # reconcile ghost guard
-        if not is_win:
-            self._sym_cooldown[sym] = time.time() + 900   # 15-min re-entry ban after a loss
+        # Re-entry cooldown: 15 min after a loss, 5 min after any win — stops
+        # instant churn back into the same coin at a worse price.
+        self._sym_cooldown[sym] = time.time() + (900 if not is_win else 300)
         # A slot just freed — give queued (slot-blocked) signals a fresh shot
         if self._blocked_signals:
             asyncio.get_event_loop().create_task(self._retry_blocked())
