@@ -444,6 +444,7 @@ class AlphaBot:
         self._btc_trend: str = 'neutral'     # 'bull' | 'bear' | 'neutral' — 1H macro filter
         self._btc_4h_trend: str = 'neutral'  # 4H institutional timeframe
         self._btc_daily_bull: bool = True    # daily macro regime
+        self._btc_daily_dist: float = 0.0    # % distance from daily EMA20 (0 ≈ no trend)
         self._btc_5m_mom: float = 0.0       # BTC 10-min momentum for altcoin timing
         self._btc_rsi:   float = 50.0        # BTC 1h RSI — whale capitulation detector
         self._fear_greed: int  = 50          # 0=extreme fear, 100=extreme greed
@@ -874,6 +875,9 @@ class AlphaBot:
             c1d   = df1d['close'].astype(float)
             ema20_1d = c1d.ewm(span=20, adjust=False).mean().iloc[-1]
             self._btc_daily_bull = float(c1d.iloc[-1]) > ema20_1d
+            # distance from the daily EMA20 in % — near zero means NO daily trend
+            # (the binary flag flip-flops there and blocked BOTH directions)
+            self._btc_daily_dist = (float(c1d.iloc[-1]) / float(ema20_1d) - 1) * 100
         except:
             pass  # keep last known value
 
@@ -1176,12 +1180,15 @@ class AlphaBot:
         if direction == 'short' and self._btc_4h_trend == 'bull' and not btc_extreme_overbought:
             self.emit('fail', f"{sym} 4H BULL → SHORT blocked (FNG={fng}) → SKIP"); return
 
-        # ── Daily macro gate — needs big extra confidence against daily trend ──
-        if not self._btc_daily_bull and direction == 'long' and not btc_extreme_oversold:
+        # ── Daily macro gate — extra confidence against a REAL daily trend.
+        # Applies only when BTC is >0.5% away from its daily EMA20; when price
+        # straddles the line the flag flip-flops and was blocking BOTH sides.
+        _ddist = getattr(self, '_btc_daily_dist', 0.0)
+        if _ddist < -0.5 and direction == 'long' and not btc_extreme_oversold:
             need = min_conf + 12
             if conf < need:
                 self.emit('fail', f"{sym} Daily BEAR LONG needs {need:.0f}%+ got {conf:.0f}% → SKIP"); return
-        if self._btc_daily_bull and direction == 'short' and not btc_extreme_overbought:
+        if _ddist > 0.5 and direction == 'short' and not btc_extreme_overbought:
             need = min_conf + 12
             if conf < need:
                 self.emit('fail', f"{sym} Daily BULL SHORT needs {need:.0f}%+ got {conf:.0f}% → SKIP"); return
