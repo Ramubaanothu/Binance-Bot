@@ -68,6 +68,7 @@ class Client:
         self._rate_lock = threading.Lock()
         self._time_offset = 0.0   # ms: Binance server time - local time
         self._offset_ts   = 0.0
+        self._last_good_balance = 0.0   # last successful balance read (fallback)
         self.sync_time()
 
     def sync_time(self):
@@ -268,14 +269,24 @@ class Client:
             return paper_balance
         try:
             acc = self.account()
+            bal = None
             for a in acc.get('assets', []):
-                if a['asset'] == 'USDT': return float(a['availableBalance'])
-            wb = float(acc.get('totalWalletBalance', 0))
-            if wb > 0: return wb
-            return 10000.0
+                if a['asset'] == 'USDT':
+                    bal = float(a['availableBalance']); break
+            if bal is None:
+                wb = float(acc.get('totalWalletBalance', 0))
+                bal = wb if wb > 0 else None
+            if bal is not None:
+                self._last_good_balance = bal      # remember a real reading
+                return bal
         except Exception as e:
-            log.warning(f"balance error ({e}) — paper mode: $10000 USDT")
-            return 10000.0
+            log.warning(f"balance fetch failed ({type(e).__name__}) — "
+                        f"keeping last known ${self._last_good_balance:.2f}")
+        # Network/API failure: NEVER invent $10,000 (it wrecks balance, chart,
+        # drawdown, risk). Hold the last good balance instead.
+        if self._last_good_balance > 0:
+            return self._last_good_balance
+        return paper_balance if paper_balance > 0 else 10000.0
 
     def load_symbols(self):
         info = self.exchange_info()
@@ -792,6 +803,7 @@ class AlphaBot:
             'avg_win':      round(self.avg_win, 4),
             'avg_loss':     round(self.avg_loss, 4),
             'risk_per_trade': round(self.balance * config.RISK_PER_TRADE_PCT / 100, 2),
+            'risk_pct':       config.RISK_PER_TRADE_PCT,
             'paper_mode':      config.PAPER_MODE,
             'btc_trend':       self._btc_trend,
             'btc_4h_trend':    self._btc_4h_trend,

@@ -463,24 +463,23 @@ def _positions(S: dict) -> Panel:
         box=box.SIMPLE_HEAD, expand=True, padding=(0, 0),
         header_style='bold dim', show_edge=False, show_footer=False,
     )
-    # Tight columns — no Lev column, combined Entry→Now arrow
-    tbl.add_column('Symbol',  no_wrap=True, min_width=10, max_width=13)
-    tbl.add_column('Dir',     width=5,  no_wrap=True)
-    tbl.add_column('Lev',     width=4,  justify='right', no_wrap=True)
-    tbl.add_column('Entry',   width=9,  justify='right', no_wrap=True)
-    tbl.add_column('Now',     width=9,  justify='right', no_wrap=True)
-    tbl.add_column('P&L %',  width=8,  justify='right', no_wrap=True)
-    tbl.add_column('Trend',   width=11, no_wrap=True)
-    tbl.add_column('P&L $',  width=8,  justify='right', no_wrap=True)
-    tbl.add_column('Value',   width=9,  justify='right', no_wrap=True)   # total position $
-    tbl.add_column('Margin',  width=8,  justify='right', no_wrap=True)   # invested $
+    # Combined Dir+Lev column (▲9x / ▼9x) so nothing truncates
+    tbl.add_column('Symbol',  no_wrap=True, min_width=9, max_width=12)
+    tbl.add_column('Dir·Lev', width=6,  no_wrap=True)
+    tbl.add_column('Entry',   width=8,  justify='right', no_wrap=True)
+    tbl.add_column('Now',     width=8,  justify='right', no_wrap=True)
+    tbl.add_column('P&L%',   width=7,  justify='right', no_wrap=True)
+    tbl.add_column('Trend',   width=8,  no_wrap=True)
+    tbl.add_column('P&L$',   width=8,  justify='right', no_wrap=True)
+    tbl.add_column('Value',   width=8,  justify='right', no_wrap=True)   # total position $
+    tbl.add_column('Margin',  width=7,  justify='right', no_wrap=True)   # invested $
     tbl.add_column('Ph',      width=5,  no_wrap=True)
 
     seen = set()
     if not positions:
         tbl.add_row(
             Text('No positions — scanning…', style=FAINT),
-            '', '', '', '', '', '', '', '', '', ''
+            '', '', '', '', '', '', '', '', ''
         )
     else:
         for p in positions:
@@ -504,20 +503,18 @@ def _positions(S: dict) -> Panel:
 
             is_long = d == 'long'
             dir_col = f'bold {TEAL}' if is_long else f'bold {PINK}'
-            dir_sym = '▲ L' if is_long else '▼ S'
-            lev_col = (AMBER if lev >= 15 else FAINT)
+            dirlev  = f"{'▲' if is_long else '▼'}{lev}x"   # e.g. ▲9x
             pp_col  = _pcol(pp) if pp else FAINT
 
             ph_lbl, _old = _PHASE_NAMES.get(phase, (phase.upper()[:4], 'dim'))
 
             tbl.add_row(
                 Text(sym, style=f'bold {TXT}'),
-                Text(dir_sym, style=dir_col),
-                Text(f'{lev}x', style=lev_col),
+                Text(dirlev, style=dir_col),
                 Text(_fmt_price(entry), style=FAINT),
                 Text(_fmt_price(curr),  style=TXT),
                 Text(f'{pp:+.2f}%', style=f'bold {pp_col}'),
-                Text(_spark_line(h, 10), style=pp_col),
+                Text(_spark_line(h, 7), style=pp_col),
                 Text(f'{pu:+.2f}', style=f'bold {pp_col}'),
                 Text(f'${notional:,.0f}', style=TXT),
                 Text(f'${margin:,.0f}', style=FAINT),
@@ -602,12 +599,16 @@ def _scanner(S: dict, frame: int) -> Panel:
     # Rejected 'FILTER' spam and info lines are excluded; the scan counter above
     # already shows how many were filtered. Dedupe repeated same-symbol events.
     _SHOW_TYPES = {'pass', 'exec', 'exit', 'warn', 'error'}
+    _NET_NOISE  = ('HTTPSConnectionPool', 'Connection', 'Max retries',
+                   'timed out', 'timeout', 'RemoteDisconnected', 'reconcile')
     _last_key = None
     for e in log_lines:
         if shown >= max_lines: break
         etype = e.get('type', 'info')
         if etype not in _SHOW_TYPES: continue
         _msg0 = e.get('msg', '')
+        # Drop transient network-error noise — not a trading signal
+        if any(p.lower() in _msg0.lower() for p in _NET_NOISE): continue
         _mk   = _sym_re.search(_msg0)
         _dedup_key = (etype, _mk.group(1) if _mk else _msg0[:20])
         if _dedup_key == _last_key: continue   # skip consecutive duplicate
@@ -855,7 +856,9 @@ def _stats(S: dict) -> Panel:
     dd_col  = 'bright_green' if dd < 5 else ('yellow' if dd < 10 else 'bright_red')
 
     t = Text()
-    t.append_text(metric('Risk/trade', f"${S.get('risk_per_trade', 0):.2f} (0.4%)", CYAN2))
+    _rpct = S.get('risk_pct', 0)
+    _rcol = PINK if _rpct >= 5 else CYAN2   # flag dangerous risk sizing
+    t.append_text(metric('Risk/trade', f"${S.get('risk_per_trade', 0):.2f} ({_rpct:.1f}%)", _rcol))
     t.append_text(metric('ProfitFac', f'{pf:.2f}',              pf_col))
     t.append_text(metric('Expectancy',f'${expect:+.2f}/trade',  ex_col))
     t.append_text(metric('WinRate',   f'{wr:.0f}% ({wins}W/{losses}L)', wr_col))
