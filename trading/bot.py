@@ -434,6 +434,7 @@ class AlphaBot:
         self._blocked_signals: dict[str, float] = {}  # sym → ts: passed gates but no slot free
         self._retry_busy = False                   # re-entry guard for blocked-signal retry
         self._vol24: dict[str, float] = {}         # sym → 24h quote volume (liquidity tiering)
+        self._htf_cache: dict[str, tuple] = {}     # sym → (ts, h4_bull, d1_bull) higher-TF trend
         self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
         self._recently_closed: dict[str, float] = {}   # sym → close ts (reconcile ghost guard)
         self._sym_cooldown: dict[str, float] = {}      # sym → ts until re-entry allowed after SL
@@ -933,6 +934,27 @@ class AlphaBot:
             return 0  # uncategorized coins are not assumed correlated
         return sum(1 for s in self.positions if self.sector.get(s, 'Other') == sec)
 
+    def _htf_trend(self, sym: str) -> tuple[bool, bool]:
+        """Coin's own 4h and 1d trend (price vs EMA20). Cached 30 min — these
+        barely move and would otherwise double the per-scan API load."""
+        now = time.time()
+        c = self._htf_cache.get(sym)
+        if c and now - c[0] < 1800:
+            return c[1], c[2]
+        h4_bull = d1_bull = True
+        try:
+            r4 = self.client.klines(sym, '4h', 30)
+            c4 = pd.Series([float(k[4]) for k in r4])
+            h4_bull = float(c4.iloc[-1]) > c4.ewm(span=20, adjust=False).mean().iloc[-1]
+        except Exception: pass
+        try:
+            r1d = self.client.klines(sym, '1d', 30)
+            c1d = pd.Series([float(k[4]) for k in r1d])
+            d1_bull = float(c1d.iloc[-1]) > c1d.ewm(span=20, adjust=False).mean().iloc[-1]
+        except Exception: pass
+        self._htf_cache[sym] = (now, h4_bull, d1_bull)
+        return h4_bull, d1_bull
+
     def analyse_symbol(self, sym: str, price_hint: float = 0.0) -> dict | None:
         try:
             raw5  = self.client.klines(sym, config.TF_FAST, config.KLINE_LIMIT)
@@ -970,6 +992,9 @@ class AlphaBot:
             h1_bull = float(c1h.iloc[-1]) > ema20_1h
         except:
             h1_bull = True  # default: no filter
+
+        # Higher-timeframe direction: coin's own 4h + 1d trend (cached)
+        htf4, htf1d = self._htf_trend(sym)
 
         price = price_hint if price_hint > 0 else 0.0
         if price <= 0:
@@ -1009,6 +1034,8 @@ class AlphaBot:
             'oi_bias':   ctx.get('oi_bias', 0),
             'vol_ratio': round(vol_ratio, 2),   # breakout volume confirmation
             'h1_bull':   h1_bull,               # 1h trend alignment
+            'h4_bull':   htf4,                  # 4h trend (higher-TF confirmation)
+            'd1_bull':   htf1d,                 # 1d trend (macro confirmation)
             'ext_atr':   round(ext_atr, 2),     # chart extension from 5m EMA20 (ATRs)
             'sig':       sig,
         }
@@ -1136,6 +1163,12 @@ class AlphaBot:
         min_conf  = session_min_conf()
         if sym in config.MAJOR_LEVERAGE:
             min_conf -= config.MAJOR_CONF_DISCOUNT   # majors: cleaner signals, lower bar
+        # Higher-timeframe alignment (coin's own 4h + 1d) lowers the bar — a trade
+        # riding the higher-TF trend is the higher-quality entry.
+        htf_aligned = ((direction == 'long'  and a.get('h4_bull') and a.get('d1_bull')) or
+                       (direction == 'short' and not a.get('h4_bull') and not a.get('d1_bull')))
+        if htf_aligned:
+            min_conf -= 4
         conf      = a['confidence']
 
         if conf < min_conf:
@@ -1435,6 +1468,7 @@ class AlphaBot:
             f"{star}{'LONG' if direction=='long' else 'SHORT'} {sym} @ {entry:.6g} | "
             f"qty={qty} lev={lev}x | conf={a['confidence']:.0f}% | regime={a['regime']} | "
             f"SL={exits['sl']:.5g} TP1={exits['tp1']:.5g} TP3={exits['tp3']:.5g} | "
+            f"HTF 4h:{'↑' if a.get('h4_bull') else '↓'} 1d:{'↑' if a.get('d1_bull') else '↓'} | "
             f"pats=[{pats}] | {current_session()} | "
             f"BTC 1H:{self._btc_trend} 4H:{self._btc_4h_trend} {'D:BULL' if self._btc_daily_bull else 'D:BEAR'} "
             f"RSI={btc_rsi:.0f} F&G={self._fear_greed}"
@@ -1493,6 +1527,25 @@ class AlphaBot:
                 pnl_pct = pos['pnl_pct']
 
                 lev_used = pos.get('leverage', config.LEVERAGE)
+
+                # ── ROI TAKE-PROFIT BAND — bank a quick concrete gain (SL untouched)
+                #   +5% ROI  → close TAKE_PROFIT_ROI_1_SCALE of the position
+                #   +10% ROI → close the remainder
+                # The runner from the +5% rung is protected by the peak ratchet
+                # (tp1_hit=True engages the 40%-of-peak retention below).
+                if pnl_pct >= config.TAKE_PROFIT_ROI_2 and pos.get('roi_banked'):
+                    await self.close(sym, pos, pnl_pct, f"+{config.TAKE_PROFIT_ROI_2:.0f}% ROI TP")
+                    continue
+                if pnl_pct >= config.TAKE_PROFIT_ROI_1 and not pos.get('roi_banked'):
+                    pos['roi_banked'] = True
+                    pos['tp1_hit']    = True     # engage peak-ratchet protection on runner
+                    pos['phase']      = 'tp-run'
+                    await self._partial_close(sym, pos, config.TAKE_PROFIT_ROI_1_SCALE, current)
+                    self.emit('exec',
+                        f"💰 +{config.TAKE_PROFIT_ROI_1:.0f}% ROI {sym} — banked "
+                        f"{config.TAKE_PROFIT_ROI_1_SCALE*100:.0f}%, runner rides to "
+                        f"+{config.TAKE_PROFIT_ROI_2:.0f}% (SL unchanged @ {pos['sl']:.6g})")
+                    self._save_positions()
 
                 # Breakeven lock
                 if not pos['be_locked']:
