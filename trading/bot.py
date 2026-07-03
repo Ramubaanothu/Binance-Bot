@@ -1399,38 +1399,44 @@ class AlphaBot:
         if direction == 'short' and ext < -2.5:
             self.emit('fail', f"{sym} {ext:.1f} ATR below EMA20 — chasing, wait for bounce → SKIP"); return
 
-        # ── CHART gate 1b: HIGHER-TF over-extension — catches slow multi-hour
-        # run-ups the 5m EMA20 misses. MANA ran +8% over an hour then was bought
-        # at the top → -18% SL. Also block buying in the top 12% of the 24h range
-        # (and shorting the bottom 12%) unless it's a genuine reversal runner.
-        ext1h   = a.get('ext_1h', 0.0)
-        rng_pos = a.get('rng_pos', 0.5)
-        if direction == 'long':
-            if ext1h > 3.0:
-                self.emit('fail', f"{sym} +{ext1h:.1f} ATR above 1h EMA20 — extended, top-chase → SKIP"); return
-            if rng_pos > 0.88 and not is_runner:
-                self.emit('fail', f"{sym} at {rng_pos*100:.0f}% of 24h range — buying the top → SKIP"); return
-        if direction == 'short':
-            if ext1h < -3.0:
-                self.emit('fail', f"{sym} {ext1h:.1f} ATR below 1h EMA20 — extended, bottom-chase → SKIP"); return
-            if rng_pos < 0.12 and not is_runner:
-                self.emit('fail', f"{sym} at {rng_pos*100:.0f}% of 24h range — shorting the bottom → SKIP"); return
+        # ── CHART READING: interpret price position using the TREND structure.
+        # Multi-timeframe trend = the chart's context. A push to new highs is a
+        # BREAKOUT (best long entry) in an uptrend, but "buying the top" in a
+        # range. The bot must tell them apart, not blindly veto near-high entries.
+        ext1h    = a.get('ext_1h', 0.0)
+        rng_pos  = a.get('rng_pos', 0.5)
+        strong_up = a.get('h1_bull') and a.get('h4_bull') and a.get('d1_bull')
+        strong_dn = (not a.get('h1_bull')) and (not a.get('h4_bull')) and (not a.get('d1_bull'))
+        breakout_long  = direction == 'long'  and strong_up and rng_pos > 0.80
+        breakout_short = direction == 'short' and strong_dn and rng_pos < 0.20
 
-        # ── CHART gate 2: room to target — never trade INTO a wall.
-        # If 15m swing resistance (long) / support (short) sits closer than
-        # 80% of the TP1 distance, the trade has no room to pay.
-        srl = a.get('sr_levels') or {}
         if direction == 'long':
+            # Only block extreme parabolic extension (still risky even in uptrends)
+            if ext1h > 4.0:
+                self.emit('fail', f"{sym} +{ext1h:.1f} ATR above 1h EMA20 — parabolic, wait → SKIP"); return
+            # Top-of-range only blocks when NOT a confirmed uptrend breakout
+            if rng_pos > 0.90 and not is_runner and not strong_up:
+                self.emit('fail', f"{sym} {rng_pos*100:.0f}% of range in a non-trending tape — top-chase → SKIP"); return
+        if direction == 'short':
+            if ext1h < -4.0:
+                self.emit('fail', f"{sym} {ext1h:.1f} ATR below 1h EMA20 — parabolic, wait → SKIP"); return
+            if rng_pos < 0.10 and not is_runner and not strong_dn:
+                self.emit('fail', f"{sym} {rng_pos*100:.0f}% of range in a non-trending tape — bottom-chase → SKIP"); return
+
+        # ── Room to target — don't trade INTO a wall. On a confirmed breakout
+        # the nearest resistance was just broken, so skip this check there.
+        srl = a.get('sr_levels') or {}
+        if direction == 'long' and not breakout_long:
             walls = [r for r in (srl.get('resistance') or []) if r > a['price']]
             if walls:
                 near = min(walls)
-                if (near - a['price']) < tp1_dist * 0.8:
+                if (near - a['price']) < tp1_dist * 0.6:
                     self.emit('fail', f"{sym} resistance {near:.6g} ({(near/a['price']-1)*100:+.2f}%) blocks TP1 → SKIP"); return
-        else:
+        elif direction == 'short' and not breakout_short:
             walls = [s for s in (srl.get('support') or []) if s < a['price']]
             if walls:
                 near = max(walls)
-                if (a['price'] - near) < tp1_dist * 0.8:
+                if (a['price'] - near) < tp1_dist * 0.6:
                     self.emit('fail', f"{sym} support {near:.6g} ({(near/a['price']-1)*100:+.2f}%) blocks TP1 → SKIP"); return
 
         # ── Position sizing — PRO MODEL: risk-based, not notional-based.
@@ -1539,7 +1545,8 @@ class AlphaBot:
         pats  = ', '.join(a['patterns']) if a['patterns'] else '—'
         star  = '⭐' if is_major else ''
         self.emit('exec',
-            f"{star}{'🚀[RUNNER] ' if is_runner else ''}{'LONG' if direction=='long' else 'SHORT'} {sym} @ {entry:.6g} | "
+            f"{star}{'🚀[RUNNER] ' if is_runner else ''}{'📈[BREAKOUT] ' if (breakout_long or breakout_short) else ''}"
+            f"{'LONG' if direction=='long' else 'SHORT'} {sym} @ {entry:.6g} | "
             f"qty={qty} lev={lev}x | conf={a['confidence']:.0f}% | regime={a['regime']} | "
             f"{'TP 20-50%' if is_runner else 'TP 5-10%'} | "
             f"SL={exits['sl']:.5g} TP1={exits['tp1']:.5g} TP3={exits['tp3']:.5g} | "
