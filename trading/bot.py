@@ -985,11 +985,15 @@ class AlphaBot:
             vol_ratio = 1.0
 
         # 1h timeframe confirmation: is the 1h candle agreeing with direction?
+        ema20_1h = 0.0; atr_1h = 0.0; hi_1h = 0.0; lo_1h = 0.0
         try:
             df1h    = TAEngine.build(raw1h)
             c1h     = df1h['close'].astype(float)
-            ema20_1h= c1h.ewm(span=20, adjust=False).mean().iloc[-1]
+            ema20_1h= float(c1h.ewm(span=20, adjust=False).mean().iloc[-1])
             h1_bull = float(c1h.iloc[-1]) > ema20_1h
+            atr_1h  = float((df1h['high'] - df1h['low']).tail(14).mean())
+            hi_1h   = float(df1h['high'].tail(24).max())   # ~last 24h range
+            lo_1h   = float(df1h['low'].tail(24).min())
         except:
             h1_bull = True  # default: no filter
 
@@ -1009,6 +1013,22 @@ class AlphaBot:
             ema20_5 = float(c5.ewm(span=20, adjust=False).mean().iloc[-1])
             if sig.atr > 0 and price > 0:
                 ext_atr = (price - ema20_5) / sig.atr
+        except Exception:
+            pass
+
+        # HIGHER-TF extension (1h) — the 5m EMA20 tracks a slow multi-hour run-up
+        # too closely and misses it; the 1h catches "bought the top" (MANA -18%).
+        ext_1h = 0.0
+        try:
+            if atr_1h > 0 and price > 0:
+                ext_1h = (price - ema20_1h) / atr_1h
+        except Exception:
+            pass
+        # Position within the last-24h range (0 = at low, 1 = at high)
+        rng_pos = 0.5
+        try:
+            if hi_1h > lo_1h:
+                rng_pos = (price - lo_1h) / (hi_1h - lo_1h)
         except Exception:
             pass
 
@@ -1037,6 +1057,8 @@ class AlphaBot:
             'h4_bull':   htf4,                  # 4h trend (higher-TF confirmation)
             'd1_bull':   htf1d,                 # 1d trend (macro confirmation)
             'ext_atr':   round(ext_atr, 2),     # chart extension from 5m EMA20 (ATRs)
+            'ext_1h':    round(ext_1h, 2),      # chart extension from 1h EMA20 (ATRs)
+            'rng_pos':   round(rng_pos, 2),     # 0=24h low, 1=24h high
             'sig':       sig,
         }
 
@@ -1365,6 +1387,23 @@ class AlphaBot:
         if direction == 'short' and ext < -2.5:
             self.emit('fail', f"{sym} {ext:.1f} ATR below EMA20 — chasing, wait for bounce → SKIP"); return
 
+        # ── CHART gate 1b: HIGHER-TF over-extension — catches slow multi-hour
+        # run-ups the 5m EMA20 misses. MANA ran +8% over an hour then was bought
+        # at the top → -18% SL. Also block buying in the top 12% of the 24h range
+        # (and shorting the bottom 12%) unless it's a genuine reversal runner.
+        ext1h   = a.get('ext_1h', 0.0)
+        rng_pos = a.get('rng_pos', 0.5)
+        if direction == 'long':
+            if ext1h > 3.0:
+                self.emit('fail', f"{sym} +{ext1h:.1f} ATR above 1h EMA20 — extended, top-chase → SKIP"); return
+            if rng_pos > 0.88 and not is_runner:
+                self.emit('fail', f"{sym} at {rng_pos*100:.0f}% of 24h range — buying the top → SKIP"); return
+        if direction == 'short':
+            if ext1h < -3.0:
+                self.emit('fail', f"{sym} {ext1h:.1f} ATR below 1h EMA20 — extended, bottom-chase → SKIP"); return
+            if rng_pos < 0.12 and not is_runner:
+                self.emit('fail', f"{sym} at {rng_pos*100:.0f}% of 24h range — shorting the bottom → SKIP"); return
+
         # ── CHART gate 2: room to target — never trade INTO a wall.
         # If 15m swing resistance (long) / support (short) sits closer than
         # 80% of the TP1 distance, the trade has no room to pay.
@@ -1570,11 +1609,16 @@ class AlphaBot:
                     pos['be_locked']  = True
                     pos['phase']      = 'run' if pos.get('runner') else 'tp-run'
                     await self._partial_close(sym, pos, _sc1, current)
-                    # TP1 done → stop to entry (breakeven): the runner can't lose now
-                    self._move_sl_to_breakeven(sym, pos)   # sets internal + exchange SL to entry
+                    # TP1 done → stop to entry, then RAISE it to lock a minimum
+                    # profit (runner must not round-trip back to ~0).
+                    self._move_sl_to_breakeven(sym, pos)   # exchange + internal SL to entry
+                    floor = entry * (1 + sign * (config.MIN_RUNNER_PROFIT_ROI / lev_used) / 100)
+                    if sign * (floor - pos['trail_sl']) > 0:
+                        pos['trail_sl'] = round(floor, 8)
                     self.emit('exec',
                         f"💰 +{_roi1:.0f}% ROI {sym}{' [RUNNER]' if pos.get('runner') else ''} — "
-                        f"banked {_sc1*100:.0f}%, SL→entry {entry:.6g}, rides to +{_roi2:.0f}%")
+                        f"banked {_sc1*100:.0f}%, SL locks +{config.MIN_RUNNER_PROFIT_ROI:.1f}% "
+                        f"@ {pos['trail_sl']:.6g}, rides to +{_roi2:.0f}%")
                     self._save_positions()
 
                 # Breakeven lock
