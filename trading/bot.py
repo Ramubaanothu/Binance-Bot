@@ -972,6 +972,17 @@ class AlphaBot:
             try: price = self.client.price(sym)
             except: price = 0.0
 
+        # Chart extension: how many ATRs is price stretched from its 5m EMA20?
+        # Entries chasing a vertical candle mean-revert into the SL.
+        ext_atr = 0.0
+        try:
+            c5      = pd.Series([float(k[4]) for k in raw5])
+            ema20_5 = float(c5.ewm(span=20, adjust=False).mean().iloc[-1])
+            if sig.atr > 0 and price > 0:
+                ext_atr = (price - ema20_5) / sig.atr
+        except Exception:
+            pass
+
         return {
             'symbol':    sym,
             'price':     price,
@@ -994,6 +1005,7 @@ class AlphaBot:
             'oi_bias':   ctx.get('oi_bias', 0),
             'vol_ratio': round(vol_ratio, 2),   # breakout volume confirmation
             'h1_bull':   h1_bull,               # 1h trend alignment
+            'ext_atr':   round(ext_atr, 2),     # chart extension from 5m EMA20 (ATRs)
             'sig':       sig,
         }
 
@@ -1279,6 +1291,31 @@ class AlphaBot:
         rr_ratio  = tp1_dist / sl_dist if sl_dist > 0 else 0
         if rr_ratio < config.MIN_RR_RATIO:
             self.emit('fail', f"{sym} R:R={rr_ratio:.2f}x < {config.MIN_RR_RATIO}x minimum → SKIP"); return
+
+        # ── CHART gate 1: over-extension — don't chase a vertical move.
+        # Price stretched far beyond its 5m EMA20 mean-reverts into the SL.
+        ext = a.get('ext_atr', 0.0)
+        if direction == 'long' and ext > 2.5:
+            self.emit('fail', f"{sym} +{ext:.1f} ATR above EMA20 — chasing, wait for pullback → SKIP"); return
+        if direction == 'short' and ext < -2.5:
+            self.emit('fail', f"{sym} {ext:.1f} ATR below EMA20 — chasing, wait for bounce → SKIP"); return
+
+        # ── CHART gate 2: room to target — never trade INTO a wall.
+        # If 15m swing resistance (long) / support (short) sits closer than
+        # 80% of the TP1 distance, the trade has no room to pay.
+        srl = a.get('sr_levels') or {}
+        if direction == 'long':
+            walls = [r for r in (srl.get('resistance') or []) if r > a['price']]
+            if walls:
+                near = min(walls)
+                if (near - a['price']) < tp1_dist * 0.8:
+                    self.emit('fail', f"{sym} resistance {near:.6g} ({(near/a['price']-1)*100:+.2f}%) blocks TP1 → SKIP"); return
+        else:
+            walls = [s for s in (srl.get('support') or []) if s < a['price']]
+            if walls:
+                near = max(walls)
+                if (a['price'] - near) < tp1_dist * 0.8:
+                    self.emit('fail', f"{sym} support {near:.6g} ({(near/a['price']-1)*100:+.2f}%) blocks TP1 → SKIP"); return
 
         # ── Position sizing — PRO MODEL: risk-based, not notional-based.
         # Fixed % of equity is at stake per trade; position size derives from the
