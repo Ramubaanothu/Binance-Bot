@@ -1621,14 +1621,20 @@ class AlphaBot:
                         f"@ {pos['trail_sl']:.6g}, rides to +{_roi2:.0f}%")
                     self._save_positions()
 
-                # Breakeven lock
+                # Breakeven lock — triggers on EITHER a price move (BE_LOCK_PCT)
+                # OR a leverage-independent ROI gain (BE_LOCK_ROI). Low-leverage
+                # coins (e.g. XPL 4x) reach a good ROI on a small price move that
+                # the price-based trigger alone would miss — so a +4% gain no
+                # longer round-trips into a loss.
                 if not pos['be_locked']:
-                    be_trig = entry * (1 + sign * config.BE_LOCK_PCT / 100)
-                    if sign * (current - be_trig) >= 0:
+                    be_price = sign * (current - entry * (1 + sign * config.BE_LOCK_PCT / 100)) >= 0
+                    be_roi   = pnl_pct >= config.BE_LOCK_ROI
+                    if be_price or be_roi:
                         pos['trail_sl'] = entry * (1 + sign * 0.001)
                         pos['be_locked'] = True
                         pos['phase']     = 'be-locked'
-                        self.emit('info', f"🔒 BE-locked {sym} @ {current:.6g}")
+                        self.emit('info', f"🔒 BE-locked {sym} @ {current:.6g} "
+                                          f"({'ROI' if be_roi and not be_price else 'price'} +{pnl_pct:.1f}%)")
                         self._save_positions()
 
                 # TP1 — bank half the position, move SL to breakeven, let rest run
