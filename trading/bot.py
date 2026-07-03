@@ -1229,6 +1229,9 @@ class AlphaBot:
                 extra = 0
             elif btc_extreme_overbought:
                 extra = 8
+            elif not a.get('h1_bull', True):
+                extra = 8   # relative weakness: coin in its OWN 1H downtrend while
+                            # BTC bounces — the pro short, cheap entry
             elif is_priority:
                 extra = config.BULL_SHORT_EXTRA - 5
             else:
@@ -1522,6 +1525,19 @@ class AlphaBot:
                 # ticks never ratcheted, letting +40% ROI decay to a BE exit.)
                 if sign > 0: pos['peak'] = max(pos.get('peak', entry), current)
                 else:        pos['peak'] = min(pos.get('peak', entry), current)
+
+                # ── R-multiple ladder — arms BEFORE BE-lock. A trade that earns
+                # a meaningful fraction of its risk must never round-trip to full
+                # SL (positions peaked +10% ROI then died at -SL).
+                sl0 = abs(entry - pos.get('sl', entry))
+                if sl0 > 0:
+                    peak_R = sign * (pos['peak'] - entry) / sl0
+                    lad = None
+                    if   peak_R >= 1.0: lad = entry * (1 + sign * 0.0005)   # ≥1R → breakeven
+                    elif peak_R >= 0.5: lad = entry - sign * sl0 * 0.5      # ≥0.5R → half risk
+                    if lad is not None and sign * (lad - pos['trail_sl']) > 0:
+                        pos['trail_sl'] = round(lad, 8)
+
                 if pos['tp1_hit'] or pos['be_locked']:
                     peak      = pos.get('peak', entry)
                     peak_gain = sign * (peak / entry - 1)     # price move at peak
@@ -1543,7 +1559,10 @@ class AlphaBot:
                 if tp3_hit:
                     await self.close(sym, pos, pnl_pct, 'TP3 HIT')
                 elif sl_hit:
-                    r = 'TRAIL SL' if pos['tp1_hit'] else ('BE EXIT' if pos['be_locked'] else 'STOP LOSS')
+                    if   pos['tp1_hit']:   r = 'TRAIL SL'
+                    elif pos['be_locked']: r = 'BE EXIT'
+                    elif sign * (pos['trail_sl'] - pos['sl']) > 1e-12: r = 'RISK-CUT'  # R-ladder saved part of the risk
+                    else:                  r = 'STOP LOSS'
                     await self.close(sym, pos, pnl_pct, r)
                 elif max_g:
                     await self.close(sym, pos, pnl_pct, 'MAX GAIN CAP')
