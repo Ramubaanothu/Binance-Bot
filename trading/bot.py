@@ -1559,11 +1559,14 @@ class AlphaBot:
                 if pnl_pct >= _roi1 and not pos.get('roi_banked'):
                     pos['roi_banked'] = True
                     pos['tp1_hit']    = True     # engage peak-ratchet protection on runner
+                    pos['be_locked']  = True
                     pos['phase']      = 'run' if pos.get('runner') else 'tp-run'
                     await self._partial_close(sym, pos, _sc1, current)
+                    # TP1 done → stop to entry (breakeven): the runner can't lose now
+                    self._move_sl_to_breakeven(sym, pos)   # sets internal + exchange SL to entry
                     self.emit('exec',
                         f"💰 +{_roi1:.0f}% ROI {sym}{' [RUNNER]' if pos.get('runner') else ''} — "
-                        f"banked {_sc1*100:.0f}%, rides to +{_roi2:.0f}% (SL unchanged @ {pos['sl']:.6g})")
+                        f"banked {_sc1*100:.0f}%, SL→entry {entry:.6g}, rides to +{_roi2:.0f}%")
                     self._save_positions()
 
                 # Breakeven lock
