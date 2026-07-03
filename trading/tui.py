@@ -58,7 +58,7 @@ except ImportError:
 
 import websockets
 from rich.align import Align
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -106,8 +106,29 @@ _log_feed         = deque(maxlen=120)     # raw log entries for scanner panel
 _connected        = False
 _quit_evt         = threading.Event()
 _action           = None                  # pending keyboard action
-_balance_history  = deque(maxlen=120)     # (unix_ts, balance) for chart
+_balance_history  = deque(maxlen=20000)   # (unix_ts, balance) — FULL wallet history
 _bal_last_ts      = 0.0                   # throttle: record at most every 30s
+_bal_save_ts      = 0.0                   # throttle disk writes
+_BAL_FILE         = pathlib.Path(__file__).parent / 'balance_history.json'
+
+def _load_balance_history():
+    """Load the full wallet-balance history from disk so the chart spans from
+    the first recorded point (wallet start) through today, across restarts."""
+    try:
+        if _BAL_FILE.exists():
+            data = json.loads(_BAL_FILE.read_text(encoding='utf-8'))
+            for ts, bal in data[-20000:]:
+                _balance_history.append((float(ts), float(bal)))
+    except Exception:
+        pass
+
+def _save_balance_history():
+    try:
+        _BAL_FILE.write_text(json.dumps(list(_balance_history)), encoding='utf-8')
+    except Exception:
+        pass
+
+_load_balance_history()
 
 # ─── WebSocket listener ───────────────────────────────────────────────────────
 def _ws_thread():
@@ -449,15 +470,17 @@ def _positions(S: dict) -> Panel:
     tbl.add_column('Entry',   width=9,  justify='right', no_wrap=True)
     tbl.add_column('Now',     width=9,  justify='right', no_wrap=True)
     tbl.add_column('P&L %',  width=8,  justify='right', no_wrap=True)
-    tbl.add_column('Trend',   width=13, no_wrap=True)
+    tbl.add_column('Trend',   width=11, no_wrap=True)
     tbl.add_column('P&L $',  width=8,  justify='right', no_wrap=True)
+    tbl.add_column('Value',   width=9,  justify='right', no_wrap=True)   # total position $
+    tbl.add_column('Margin',  width=8,  justify='right', no_wrap=True)   # invested $
     tbl.add_column('Ph',      width=5,  no_wrap=True)
 
     seen = set()
     if not positions:
         tbl.add_row(
             Text('No positions — scanning…', style=FAINT),
-            '', '', '', '', '', '', '', ''
+            '', '', '', '', '', '', '', '', '', ''
         )
     else:
         for p in positions:
@@ -469,6 +492,8 @@ def _positions(S: dict) -> Panel:
             pp    = p.get('pnl_pct', 0)
             pu    = p.get('pnl_usd', 0)
             phase = p.get('phase', 'open')
+            notional = p.get('size_usd', 0) or 0            # total position value $
+            margin   = notional / lev if lev else notional  # amount invested $
 
             # sparkline history — append only on change
             seen.add(sym)
@@ -492,8 +517,10 @@ def _positions(S: dict) -> Panel:
                 Text(_fmt_price(entry), style=FAINT),
                 Text(_fmt_price(curr),  style=TXT),
                 Text(f'{pp:+.2f}%', style=f'bold {pp_col}'),
-                Text(_spark_line(h, 12), style=pp_col),
+                Text(_spark_line(h, 10), style=pp_col),
                 Text(f'{pu:+.2f}', style=f'bold {pp_col}'),
+                Text(f'${notional:,.0f}', style=TXT),
+                Text(f'${margin:,.0f}', style=FAINT),
                 Text(ph_lbl, style=f'bold {VIOLET}'),
             )
     # drop sparkline history for closed positions
@@ -504,12 +531,14 @@ def _positions(S: dict) -> Panel:
     longs   = sum(1 for p in positions if p.get('direction') == 'long')
     shorts  = open_n - longs
     tot_pnl = sum(p.get('pnl_usd', 0) for p in positions)
+    tot_inv = sum((p.get('size_usd', 0) or 0) / (p.get('leverage', 10) or 10) for p in positions)
 
     title = (
         f'[bold {TEAL}]POSITIONS[/]  '
         f'[bold {TXT}]{open_n}[/][{FAINT}]/5[/]  '
         f'[{TEAL}]{longs}L[/] [{PINK}]{shorts}S[/]  '
-        f'[{_pcol(tot_pnl)}]{tot_pnl:+.2f}$[/]'
+        f'[{_pcol(tot_pnl)}]{tot_pnl:+.2f}$[/]  '
+        f'[{FAINT}]invested[/] [{VIOLET}]${tot_inv:,.0f}[/]'
     )
     return Panel(tbl, title=title, border_style='#123a33', expand=True, padding=(0, 0))
 
@@ -569,10 +598,20 @@ def _scanner(S: dict, frame: int) -> Panel:
     _conf_re = re.compile(r'(\d{1,3}(?:\.\d)?)%')
     max_lines = 26
     shown = 0
+    # SIGNALS ONLY — real trade events (passes, executions, exits, alerts).
+    # Rejected 'FILTER' spam and info lines are excluded; the scan counter above
+    # already shows how many were filtered. Dedupe repeated same-symbol events.
+    _SHOW_TYPES = {'pass', 'exec', 'exit', 'warn', 'error'}
+    _last_key = None
     for e in log_lines:
         if shown >= max_lines: break
         etype = e.get('type', 'info')
-        if etype == 'scan': continue
+        if etype not in _SHOW_TYPES: continue
+        _msg0 = e.get('msg', '')
+        _mk   = _sym_re.search(_msg0)
+        _dedup_key = (etype, _mk.group(1) if _mk else _msg0[:20])
+        if _dedup_key == _last_key: continue   # skip consecutive duplicate
+        _last_key = _dedup_key
         msg = e.get('msg', '')
         ts  = e.get('ts', '')
         col, tag = _TYPE_CFG.get(etype, (FAINT, '      '))
@@ -763,7 +802,19 @@ def _trades(S: dict) -> Panel:
         f'[{pf_col}]PF {pf:.2f}[/]  '
         f'[{FAINT}]AvgW {avg_win:+.2f}%  AvgL {avg_loss:+.2f}%[/]'
     )
-    return Panel(grid, title=title, border_style='#3a0a22', expand=True)
+
+    # ── Last-20 ribbon — see recent history beyond the 6 detailed cards ──────
+    ribbon = Text()
+    last20 = list(reversed(all_trades))[:20]
+    if last20:
+        ribbon.append('  Last 20:  ', style=FAINT)
+        for tr in last20:   # newest → oldest, left → right
+            won = tr.get('is_win', tr.get('pnl_usd', 0) > 0)
+            rc  = TEAL if won else PINK
+            sym = tr.get('symbol', '').replace('USDT', '')[:4]
+            ribbon.append(f"{sym}", style=rc)
+            ribbon.append(f"{tr.get('pnl_pct', 0):+.0f} ", style=f'bold {rc}')
+    return Panel(Group(grid, ribbon), title=title, border_style='#3a0a22', expand=True)
 
 # ─── Panel: Stats (sidebar strip) ────────────────────────────────────────────
 def _stats(S: dict) -> Panel:
@@ -820,7 +871,7 @@ def _stats(S: dict) -> Panel:
 
 # ─── Panel: Balance Chart (full-width line chart) ─────────────────────────────
 def _balance_chart(S: dict) -> Panel:
-    global _bal_last_ts
+    global _bal_last_ts, _bal_save_ts
     bal  = S.get('balance', 0.0)
     dpnl = S.get('daily_pnl', 0.0)
     tpnl = S.get('total_pnl', 0.0)
@@ -828,21 +879,28 @@ def _balance_chart(S: dict) -> Panel:
     now = time.time()
     if bal > 0:
         last_val = _balance_history[-1][1] if _balance_history else 0.0
-        # Balance source changed (e.g. paper $10k → real balance): old points are
-        # meaningless — clear so the chart doesn't show a fake cliff / session %
-        if last_val > 0 and abs(bal - last_val) / last_val > 0.20:
-            _balance_history.clear()
-        if now - _bal_last_ts >= 30 or abs(bal - last_val) >= 0.05:
+        # Record steadily — keep the FULL wallet history including drawdowns
+        # (no clearing). One point per ~60s or on any real balance change.
+        if now - _bal_last_ts >= 60 or (last_val and abs(bal - last_val) >= 0.01):
             _balance_history.append((now, bal))
             _bal_last_ts = now
+            if now - _bal_save_ts >= 30:
+                _save_balance_history()
+                _bal_save_ts = now
 
     vals   = [v for _, v in _balance_history]
     n      = len(vals)
-    mins   = int((now - _balance_history[0][0]) / 60) if _balance_history else 0
+    span_s = (now - _balance_history[0][0]) if _balance_history else 0
+    mins   = int(span_s / 60)
     ses_pct = (vals[-1] - vals[0]) / vals[0] * 100 if n >= 2 and vals[0] else 0.0
     ses_col  = _pcol(ses_pct)
     dpnl_col = _pcol(dpnl)
     tpnl_col = _pcol(tpnl)
+
+    # Human-readable span of the whole wallet history
+    if   span_s >= 86400: span_txt = f'{span_s/86400:.1f}d'
+    elif span_s >= 3600:  span_txt = f'{span_s/3600:.1f}h'
+    else:                 span_txt = f'{mins}min'
 
     # Stats line always shown at top
     stats = Text()
@@ -852,9 +910,9 @@ def _balance_chart(S: dict) -> Panel:
     stats.append(f'{dpnl:+,.2f}  ', style=f'bold {dpnl_col}')
     stats.append('TOTAL ', style=FAINT)
     stats.append(f'{tpnl:+,.2f}  ', style=f'bold {tpnl_col}')
-    stats.append('SESSION ', style=FAINT)
-    stats.append(f'{ses_pct:+.3f}%  ', style=f'bold {ses_col}')
-    stats.append(f'[{n}pts / {mins}min]\n', style=FAINT)
+    stats.append('ALL-TIME ', style=FAINT)
+    stats.append(f'{ses_pct:+.2f}%  ', style=f'bold {ses_col}')
+    stats.append(f'[{n}pts / {span_txt} wallet history]\n', style=FAINT)
 
     if n < 3:
         stats.append('\n  Collecting balance history — line chart appears after ~60 seconds\n', style=FAINT)
@@ -910,7 +968,7 @@ def _balance_chart(S: dict) -> Panel:
     body.append('─' * W, style='bright_black')
     body.append('\n')
     # Time labels
-    ago_str = f'← {mins}min ago'
+    ago_str = f'← wallet start ({span_txt} ago)'
     now_str = 'now →'
     gap = W - len(ago_str) - len(now_str)
     body.append(f'  {" " * (max_lw + 1)} ', style='dim')
