@@ -763,19 +763,19 @@ def _trades(S: dict) -> Panel:
             pp     = tr.get('pnl_pct', 0)
             pu     = tr.get('pnl_usd', 0)
             won    = tr.get('is_win', pu > 0)
-            reason = str(tr.get('reason', '—'))[:14]
-            ctime  = str(tr.get('close_time', ''))[-8:]
+            reason = str(tr.get('reason', '—'))[:16]
+            ctime  = str(tr.get('close_time', ''))[:5]     # HH:MM
             rc     = TEAL if won else PINK
             dc     = TEAL if d == 'long' else PINK
+            sym    = tr.get('symbol', '').replace('USDT', '')[:9]
 
             c = Text(justify='center')
-            c.append('▔' * 12 + '\n', style=rc)
-            c.append(f"{'▲' if d == 'long' else '▼'} ", style=f'bold {dc}')
-            c.append(f"{tr.get('symbol', '')[:12]}\n", style=f'bold {TXT}')
-            c.append(f'{pp:+.2f}%\n', style=f'bold {_pcol(pp)}')
-            c.append(f"{'WIN' if won else 'LOSS'}", style=f'bold {rc}')
-            c.append(f' · {reason}\n', style=FAINT)
-            c.append(f'{pu:+.2f}$  {ctime}', style=FAINT)
+            c.append('━' * 15 + '\n', style=rc)                       # solid header bar
+            c.append(f"{'▲' if d == 'long' else '▼'} {sym}\n", style=f'bold {dc}')
+            c.append(f'{pp:+.2f}%\n', style=f'bold {_pcol(pp)}')      # big P&L
+            c.append(f"{'✓ WIN' if won else '✗ LOSS'}\n", style=f'bold {rc}')
+            c.append(f'{reason}\n', style=FAINT)                       # exit reason
+            c.append(f'{pu:+.2f}$ · {ctime}', style=TXT if won else FAINT)
             cells.append(c)
         while len(cells) < 6:
             cells.append(Text(''))
@@ -863,8 +863,8 @@ def _stats(S: dict) -> Panel:
 _AREA_BLK = ' ▁▂▃▄▅▆▇█'   # 1/8-cell fill levels
 
 def _area_chart(vals, w, h, start_val):
-    """Solid filled area (mountain) chart with 1/8-cell vertical resolution.
-    Reads as a clean continuous shape, not scattered dots. Teal above the
+    """Line-with-fill chart: a BRIGHT surface line rides on a DIM filled area.
+    1/8-cell vertical resolution, continuous (no empty gaps). Teal above the
     wallet-start level, pink below. Returns Text rows top→bottom."""
     lo, hi = min(vals), max(vals)
     rng = (hi - lo) or 1.0
@@ -873,15 +873,17 @@ def _area_chart(vals, w, h, start_val):
     rows = [Text() for _ in range(h)]
     sub_total = h * 8
     for v in sampled:
-        level = (v - lo) / rng * sub_total          # 0 .. h*8
-        col   = TEAL if v >= start_val else PINK
-        dim   = '#0c3b32' if v >= start_val else '#3a0e22'
-        for r in range(h):                          # r=0 top row
-            cell_floor = (h - 1 - r) * 8
-            fill = level - cell_floor
-            if   fill >= 8: rows[r].append('█', style=col)
-            elif fill <= 0: rows[r].append('·', style=dim)   # faint baseline grid
-            else:           rows[r].append(_AREA_BLK[int(fill)], style=col)
+        level = max(1.0, (v - lo) / rng * sub_total)     # ≥1 → no empty column
+        line  = TEAL if v >= start_val else PINK          # bright surface line
+        body  = '#0c3b32' if v >= start_val else '#3a0e22'   # dim area fill
+        top_r = h - 1 - int((level - 0.001) // 8)         # row of the surface
+        for r in range(h):                                # r=0 = top row
+            fill = level - (h - 1 - r) * 8
+            if fill <= 0:
+                rows[r].append(' ')
+            else:
+                ch = '█' if fill >= 8 else _AREA_BLK[int(fill)]
+                rows[r].append(ch, style=line if r == top_r else body)
     return rows, lo, hi
 
 
@@ -907,7 +909,10 @@ def _balance_chart(S: dict) -> Panel:
     n      = len(vals)
     span_s = (now - _balance_history[0][0]) if _balance_history else 0
     mins   = int(span_s / 60)
-    ses_pct = (vals[-1] - vals[0]) / vals[0] * 100 if n >= 2 and vals[0] else 0.0
+    # All-time % from the true wallet start = current balance − cumulative P&L
+    # (matches the header TOTAL), not the first charted point.
+    start_cap = (bal - tpnl) if (bal - tpnl) > 0 else (vals[0] if vals else bal)
+    ses_pct = (bal - start_cap) / start_cap * 100 if start_cap else 0.0
     ses_col  = _pcol(ses_pct)
     dpnl_col = _pcol(dpnl)
     tpnl_col = _pcol(tpnl)
@@ -934,7 +939,7 @@ def _balance_chart(S: dict) -> Panel:
         return Panel(stats, title=f'[bold {TEAL}]◆ ATLAS · BALANCE[/]',
                      border_style='#123a33', expand=True)
 
-    start_val = vals[0]
+    start_val = start_cap   # teal above starting capital, pink below (honest)
     CHART_H = 6      # taller = squarer, solid filled area
     CHART_W = 96     # narrower than full width so it reads as a block, not a long thread
 
