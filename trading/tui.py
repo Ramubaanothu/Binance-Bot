@@ -870,6 +870,40 @@ def _stats(S: dict) -> Panel:
     return Panel(t, title=title, border_style='#123a33', expand=True)
 
 # ─── Panel: Balance Chart (full-width line chart) ─────────────────────────────
+def _braille_line(vals, w_cells, h_cells, start_val):
+    """Smooth connected line chart using Braille (2×4 sub-dots per cell) — far
+    higher resolution and cleaner than block/dash rows, in a fraction of the height.
+    Returns a list of Text rows (top→bottom)."""
+    DOT = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))  # [row][col] bit
+    DW, DH = w_cells * 2, h_cells * 4
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    n = len(vals)
+    sampled = [vals[min(n - 1, int(i * n / DW))] for i in range(DW)] if n else []
+    ys = [int((v - lo) / rng * (DH - 1)) for v in sampled]   # 0=bottom
+    bits, colv = {}, {}
+    for x in range(DW):
+        dots = {ys[x]}
+        if x > 0:                                            # connect to previous
+            dots |= set(range(min(ys[x - 1], ys[x]), max(ys[x - 1], ys[x]) + 1))
+        for yy in dots:
+            cell = ((DH - 1 - yy) // 4, x // 2)
+            bits[cell] = bits.get(cell, 0) | DOT[(DH - 1 - yy) % 4][x % 2]
+            colv.setdefault(cell, sampled[x])
+    rows = []
+    for r in range(h_cells):
+        line = Text()
+        for c in range(w_cells):
+            b = bits.get((r, c), 0)
+            if b:
+                line.append(chr(0x2800 + b),
+                            style=TEAL if colv.get((r, c), start_val) >= start_val else PINK)
+            else:
+                line.append(' ')
+        rows.append(line)
+    return rows, lo, hi
+
+
 def _balance_chart(S: dict) -> Panel:
     global _bal_last_ts, _bal_save_ts
     bal  = S.get('balance', 0.0)
@@ -919,58 +953,29 @@ def _balance_chart(S: dict) -> Panel:
         return Panel(stats, title=f'[bold {TEAL}]◆ ATLAS · BALANCE[/]',
                      border_style='#123a33', expand=True)
 
-    lo  = min(vals)
-    hi  = max(vals)
-    rng = hi - lo if (hi - lo) > 0.001 else 1.0
     start_val = vals[0]
+    CHART_H = 3      # cell rows (Braille = 4 sub-dots each → 12 vertical levels)
+    CHART_W = 150    # cell columns (Braille = 2 sub-dots each → 300 samples)
 
-    CHART_H = 5     # number of chart rows
-    CHART_W = 120   # max data columns (terminal clips any excess)
-
-    if n > CHART_W:
-        step    = n / CHART_W
-        sampled = [vals[int(i * step)] for i in range(CHART_W)]
-    else:
-        sampled = vals
-    W = len(sampled)
-
-    def to_row(v: float) -> int:
-        return round((v - lo) / rng * (CHART_H - 1))
-
-    y_vals = [to_row(v) for v in sampled]
-
-    # Y-axis labels (index 0 = topmost display row = highest value)
-    y_labels = [f'${lo + (r / (CHART_H - 1)) * rng:,.2f}'
-                for r in range(CHART_H - 1, -1, -1)]
-    max_lw = max(len(lb) for lb in y_labels)
+    rows, lo, hi = _braille_line(vals, CHART_W, CHART_H, start_val)
+    max_lw = len(f'${hi:,.2f}')
+    # y-labels: top row = hi, bottom row = lo, middle = midpoint
+    y_labels = [f'${hi:,.2f}', f'${(hi+lo)/2:,.2f}', f'${lo:,.2f}']
 
     body = stats
-
-    for di, chart_row in enumerate(range(CHART_H - 1, -1, -1)):
-        label = y_labels[di]
-        body.append(f'  {label:>{max_lw}} ┤', style='dim')
-        for col in range(W):
-            y       = y_vals[col]
-            pt_col  = TEAL if sampled[col] >= start_val else PINK
-            if y == chart_row:
-                body.append('─', style=pt_col)
-            elif col > 0 and min(y_vals[col - 1], y) < chart_row < max(y_vals[col - 1], y):
-                body.append('│', style=pt_col)
-            elif chart_row < y:
-                # area fill below the line — matches the HTML design's glow gradient
-                body.append('░', style='#073a30' if sampled[col] >= start_val else '#33081f')
-            else:
-                body.append(' ')
+    for i, line in enumerate(rows):
+        label = y_labels[i] if i < len(y_labels) else ''
+        body.append(f'  {label:>{max_lw}} │', style='dim')
+        body.append_text(line)
         body.append('\n')
 
-    # X-axis rule
+    # X-axis rule + time labels
     body.append(f'  {" " * max_lw} └', style='dim')
-    body.append('─' * W, style='bright_black')
+    body.append('─' * CHART_W, style='bright_black')
     body.append('\n')
-    # Time labels
     ago_str = f'← wallet start ({span_txt} ago)'
     now_str = 'now →'
-    gap = W - len(ago_str) - len(now_str)
+    gap = CHART_W - len(ago_str) - len(now_str)
     body.append(f'  {" " * (max_lw + 1)} ', style='dim')
     body.append(ago_str, style='dim')
     if gap > 0:
@@ -1003,8 +1008,8 @@ def _build(S: dict, frame: int) -> Layout:
     layout.split_column(
         Layout(name='header',    size=5),
         Layout(name='body'),
-        Layout(name='bal_chart', size=9),   # full-width balance line chart
-        Layout(name='trades',    size=9),   # ATLAS trade card grid
+        Layout(name='bal_chart', size=6),   # compact Braille balance chart (-30%)
+        Layout(name='trades',    size=12),  # ATLAS trade card grid + last-20 ribbon (more room)
         Layout(name='footer',    size=1),
     )
     layout['body'].split_row(
