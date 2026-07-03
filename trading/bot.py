@@ -1306,6 +1306,20 @@ class AlphaBot:
         if is_counter_trend and not has_strong_pattern and not btc_extreme_oversold and not btc_extreme_overbought:
             self.emit('fail', f"{sym} counter-trend without strong pattern → SKIP"); return
 
+        # ── "Solana-type" RUNNER detection — capitulation-reversal caught at the
+        # bottom (long) / top (short). These get the 20-50% ROI target instead of
+        # the 5-10% scalp: a coin that crashed and is turning has a big move ahead.
+        BULL_REVERSAL = {'Morning Star', 'Three White Soldiers', 'Bullish Engulfing',
+                         'Hammer', 'Tweezer Bottom', 'Piercing Line', 'Inverted Hammer',
+                         'Bullish Harami'}
+        BEAR_REVERSAL = {'Evening Star', 'Three Black Crows', 'Bearish Engulfing',
+                         'Shooting Star', 'Tweezer Top', 'Dark Cloud Cover', 'Bearish Harami'}
+        _pats = set(a.get('patterns', []))
+        is_runner = conf >= config.RUNNER_MIN_CONF and (
+            (direction == 'long'  and (a['rsi'] <= 30 or (_pats & BULL_REVERSAL))) or
+            (direction == 'short' and (a['rsi'] >= 70 or (_pats & BEAR_REVERSAL)))
+        )
+
         # ── Pro gate 6: R:R check — must be worth the risk ───────────────────
         # ── Venue price sanity — analysis uses REAL market data but orders fill
         # on the execution venue. If the venue's price diverges from the analysis
@@ -1418,6 +1432,7 @@ class AlphaBot:
             'entry':     entry,
             'current':   entry,
             'peak':      entry,   # best price reached — drives the profit ratchet
+            'runner':    is_runner,   # True = Solana-type reversal → 20-50% ROI target
             'qty':       qty,
             'size_usd':  round(qty * entry, 4),
             'leverage':  lev,
@@ -1465,8 +1480,9 @@ class AlphaBot:
         pats  = ', '.join(a['patterns']) if a['patterns'] else '—'
         star  = '⭐' if is_major else ''
         self.emit('exec',
-            f"{star}{'LONG' if direction=='long' else 'SHORT'} {sym} @ {entry:.6g} | "
+            f"{star}{'🚀[RUNNER] ' if is_runner else ''}{'LONG' if direction=='long' else 'SHORT'} {sym} @ {entry:.6g} | "
             f"qty={qty} lev={lev}x | conf={a['confidence']:.0f}% | regime={a['regime']} | "
+            f"{'TP 20-50%' if is_runner else 'TP 5-10%'} | "
             f"SL={exits['sl']:.5g} TP1={exits['tp1']:.5g} TP3={exits['tp3']:.5g} | "
             f"HTF 4h:{'↑' if a.get('h4_bull') else '↓'} 1d:{'↑' if a.get('d1_bull') else '↓'} | "
             f"pats=[{pats}] | {current_session()} | "
@@ -1528,23 +1544,26 @@ class AlphaBot:
 
                 lev_used = pos.get('leverage', config.LEVERAGE)
 
-                # ── ROI TAKE-PROFIT BAND — bank a quick concrete gain (SL untouched)
-                #   +5% ROI  → close TAKE_PROFIT_ROI_1_SCALE of the position
-                #   +10% ROI → close the remainder
-                # The runner from the +5% rung is protected by the peak ratchet
+                # ── ROI TAKE-PROFIT BAND — two profiles, SL untouched in both.
+                #   RUNNER (Solana-type reversal): bank at +20% ROI, close +50%.
+                #   SCALP  (default):              bank at +5% ROI,  close +10%.
+                # The runner from the first rung is protected by the peak ratchet
                 # (tp1_hit=True engages the 40%-of-peak retention below).
-                if pnl_pct >= config.TAKE_PROFIT_ROI_2 and pos.get('roi_banked'):
-                    await self.close(sym, pos, pnl_pct, f"+{config.TAKE_PROFIT_ROI_2:.0f}% ROI TP")
+                if pos.get('runner'):
+                    _roi1, _sc1, _roi2 = config.RUNNER_TP_ROI_1, config.RUNNER_TP_ROI_1_SCALE, config.RUNNER_TP_ROI_2
+                else:
+                    _roi1, _sc1, _roi2 = config.TAKE_PROFIT_ROI_1, config.TAKE_PROFIT_ROI_1_SCALE, config.TAKE_PROFIT_ROI_2
+                if pnl_pct >= _roi2 and pos.get('roi_banked'):
+                    await self.close(sym, pos, pnl_pct, f"+{_roi2:.0f}% ROI TP")
                     continue
-                if pnl_pct >= config.TAKE_PROFIT_ROI_1 and not pos.get('roi_banked'):
+                if pnl_pct >= _roi1 and not pos.get('roi_banked'):
                     pos['roi_banked'] = True
                     pos['tp1_hit']    = True     # engage peak-ratchet protection on runner
-                    pos['phase']      = 'tp-run'
-                    await self._partial_close(sym, pos, config.TAKE_PROFIT_ROI_1_SCALE, current)
+                    pos['phase']      = 'run' if pos.get('runner') else 'tp-run'
+                    await self._partial_close(sym, pos, _sc1, current)
                     self.emit('exec',
-                        f"💰 +{config.TAKE_PROFIT_ROI_1:.0f}% ROI {sym} — banked "
-                        f"{config.TAKE_PROFIT_ROI_1_SCALE*100:.0f}%, runner rides to "
-                        f"+{config.TAKE_PROFIT_ROI_2:.0f}% (SL unchanged @ {pos['sl']:.6g})")
+                        f"💰 +{_roi1:.0f}% ROI {sym}{' [RUNNER]' if pos.get('runner') else ''} — "
+                        f"banked {_sc1*100:.0f}%, rides to +{_roi2:.0f}% (SL unchanged @ {pos['sl']:.6g})")
                     self._save_positions()
 
                 # Breakeven lock
