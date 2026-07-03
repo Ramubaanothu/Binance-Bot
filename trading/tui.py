@@ -463,23 +463,21 @@ def _positions(S: dict) -> Panel:
         box=box.SIMPLE_HEAD, expand=True, padding=(0, 0),
         header_style='bold dim', show_edge=False, show_footer=False,
     )
-    # Combined Dir+Lev column (▲9x / ▼9x) so nothing truncates
+    # Combined Dir+Lev column (▲9x / ▼9x); no sparkline — numbers shown in full
     tbl.add_column('Symbol',  no_wrap=True, min_width=9, max_width=12)
     tbl.add_column('Dir·Lev', width=6,  no_wrap=True)
-    tbl.add_column('Entry',   width=8,  justify='right', no_wrap=True)
-    tbl.add_column('Now',     width=8,  justify='right', no_wrap=True)
-    tbl.add_column('P&L%',   width=7,  justify='right', no_wrap=True)
-    tbl.add_column('Trend',   width=8,  no_wrap=True)
-    tbl.add_column('P&L$',   width=8,  justify='right', no_wrap=True)
-    tbl.add_column('Value',   width=8,  justify='right', no_wrap=True)   # total position $
-    tbl.add_column('Margin',  width=7,  justify='right', no_wrap=True)   # invested $
+    tbl.add_column('Entry',   width=9,  justify='right', no_wrap=True)
+    tbl.add_column('Now',     width=9,  justify='right', no_wrap=True)
+    tbl.add_column('P&L %',  width=8,  justify='right', no_wrap=True)
+    tbl.add_column('P&L $',  width=9,  justify='right', no_wrap=True)
+    tbl.add_column('Value',   width=9,  justify='right', no_wrap=True)   # total position $
+    tbl.add_column('Invested', width=9, justify='right', no_wrap=True)   # margin $
     tbl.add_column('Ph',      width=5,  no_wrap=True)
 
-    seen = set()
     if not positions:
         tbl.add_row(
             Text('No positions — scanning…', style=FAINT),
-            '', '', '', '', '', '', '', '', ''
+            '', '', '', '', '', '', '', ''
         )
     else:
         for p in positions:
@@ -494,13 +492,6 @@ def _positions(S: dict) -> Panel:
             notional = p.get('size_usd', 0) or 0            # total position value $
             margin   = notional / lev if lev else notional  # amount invested $
 
-            # sparkline history — append only on change
-            seen.add(sym)
-            h = _pos_spark.setdefault(sym, [])
-            if not h or abs(h[-1] - pp) > 0.005:
-                h.append(pp)
-                if len(h) > 40: del h[:-40]
-
             is_long = d == 'long'
             dir_col = f'bold {TEAL}' if is_long else f'bold {PINK}'
             dirlev  = f"{'▲' if is_long else '▼'}{lev}x"   # e.g. ▲9x
@@ -514,15 +505,11 @@ def _positions(S: dict) -> Panel:
                 Text(_fmt_price(entry), style=FAINT),
                 Text(_fmt_price(curr),  style=TXT),
                 Text(f'{pp:+.2f}%', style=f'bold {pp_col}'),
-                Text(_spark_line(h, 7), style=pp_col),
                 Text(f'{pu:+.2f}', style=f'bold {pp_col}'),
                 Text(f'${notional:,.0f}', style=TXT),
-                Text(f'${margin:,.0f}', style=FAINT),
+                Text(f'${margin:,.0f}', style=VIOLET),
                 Text(ph_lbl, style=f'bold {VIOLET}'),
             )
-    # drop sparkline history for closed positions
-    for s in list(_pos_spark):
-        if positions and s not in seen: del _pos_spark[s]
 
     open_n  = len(positions)
     longs   = sum(1 for p in positions if p.get('direction') == 'long')
