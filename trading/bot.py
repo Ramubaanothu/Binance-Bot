@@ -825,7 +825,19 @@ class AlphaBot:
             self.emit('info', f"📅 New day — P&L reset. Balance: ${self.balance:.4f}")
 
     def guards_ok(self) -> bool:
-        if self.paused: return False
+        if self.paused:
+            # Auto-resume from a DRAWDOWN pause once balance recovers (hysteresis:
+            # 10% below the trip limit) — no manual restart needed.
+            if 'drawdown' in self.pause_reason.lower() and self.peak_bal > 0:
+                dd_now = (self.peak_bal - self.balance) / self.peak_bal * 100
+                if dd_now < config.MAX_DRAWDOWN_PCT - 10:
+                    self.paused = False
+                    self.pause_reason = ''
+                    self.emit('info', f"▶ Drawdown recovered to {dd_now:.1f}% — trading resumed")
+                else:
+                    return False
+            else:
+                return False
         if self.daily_start > 0:
             dloss = (self.daily_pnl / self.daily_start) * 100
             if dloss <= -config.MAX_DAILY_LOSS_PCT:
