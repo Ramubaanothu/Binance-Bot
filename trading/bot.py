@@ -1073,6 +1073,19 @@ class AlphaBot:
             move_15m = move_1h = move_4h = move_24h = 0.0
             dn_15m = dn_1h = dn_4h = dn_24h = 0.0
             ema_dist = 0.0
+
+        # ── Retest confirmation candle: last CLOSED 15m candle direction, and
+        # whether it closed strong (near its high for bull / low for bear). This
+        # is the "support holds → green candle → BUY" confirmation.
+        confirm_dir = ''
+        try:
+            k = raw15[-2]                      # last closed 15m candle
+            o, h, l, c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
+            rng = (h - l) or 1e-9
+            if c > o and (c - l) / rng > 0.55:   confirm_dir = 'bull'   # green, closed upper half
+            elif c < o and (h - c) / rng > 0.55: confirm_dir = 'bear'   # red, closed lower half
+        except Exception:
+            pass
         # Position within the last-24h range (0 = at low, 1 = at high)
         rng_pos = 0.5
         try:
@@ -1113,6 +1126,7 @@ class AlphaBot:
             'move_4h':   round(move_4h, 2),  'move_24h': round(move_24h, 2),
             'dn_15m':    round(dn_15m, 2),   'dn_1h':   round(dn_1h, 2),
             'dn_4h':     round(dn_4h, 2),    'dn_24h':  round(dn_24h, 2),
+            'confirm_dir': confirm_dir,         # 'bull'/'bear'/'' — retest confirmation candle
             'sig':       sig,
         }
 
@@ -1317,6 +1331,30 @@ class AlphaBot:
             ext_score += 20
         if ext_score >= config.EXTENSION_REJECT and not is_runner:
             self.emit('fail', f"{sym} extension score {ext_score} ≥ {config.EXTENSION_REJECT} → chasing → SKIP"); return
+
+        # ── RETEST CONFIRMED (pipeline step 5): after the pullback, require a
+        # confirmation candle in the trade direction closing off a nearby level —
+        # green candle holding support (long) / red candle rejecting resistance
+        # (short). Don't catch a falling knife mid-pullback. Runners exempt.
+        if not is_runner:
+            confirm = a.get('confirm_dir', '')
+            srl     = a.get('sr_levels') or {}
+            if direction == 'long':
+                if confirm != 'bull':
+                    self.emit('fail', f"{sym} no bullish confirmation candle — waiting for retest hold → SKIP"); return
+                sups = [s for s in (srl.get('support') or []) if s <= a['price']]
+                near = max(sups) if sups else 0
+                retest_ok = (near and (a['price'] - near) / a['price'] * 100 < 4.0) or a.get('ema_dist', 99) < 2.0
+                if not retest_ok:
+                    self.emit('fail', f"{sym} no support retest nearby — not a pullback entry → SKIP"); return
+            else:
+                if confirm != 'bear':
+                    self.emit('fail', f"{sym} no bearish confirmation candle — waiting for retest reject → SKIP"); return
+                res = [r for r in (srl.get('resistance') or []) if r >= a['price']]
+                near = min(res) if res else 0
+                retest_ok = (near and (near - a['price']) / a['price'] * 100 < 4.0) or a.get('ema_dist', 99) < 2.0
+                if not retest_ok:
+                    self.emit('fail', f"{sym} no resistance retest nearby — not a pullback entry → SKIP"); return
 
         is_major   = sym in config.MAJOR_LEVERAGE
         is_priority= sym in config.PRIORITY_SYMBOLS
