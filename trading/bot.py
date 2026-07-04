@@ -1074,6 +1074,23 @@ class AlphaBot:
             dn_15m = dn_1h = dn_4h = dn_24h = 0.0
             ema_dist = 0.0
 
+        # ── VWAP (rolling ~8h) + last-candle size vs ATR. Overextension checks:
+        # price too far from VWAP, or a single climax candle > 1.8 ATR = chasing.
+        vwap_dist = 0.0
+        last_candle_atr = 0.0
+        try:
+            tps = [(float(k[2]) + float(k[3]) + float(k[4])) / 3 for k in raw15[-32:]]
+            vls = [float(k[5]) for k in raw15[-32:]]
+            vsum = sum(vls)
+            if vsum > 0:
+                vwap = sum(t * v for t, v in zip(tps, vls)) / vsum
+                vwap_dist = abs(price - vwap) / vwap * 100 if vwap > 0 else 0.0
+            lc = raw5[-2]                               # last closed 5m candle
+            if sig.atr > 0:
+                last_candle_atr = (float(lc[2]) - float(lc[3])) / sig.atr
+        except Exception:
+            pass
+
         # ── Retest confirmation candle: last CLOSED 15m candle direction, and
         # whether it closed strong (near its high for bull / low for bear). This
         # is the "support holds → green candle → BUY" confirmation.
@@ -1127,6 +1144,8 @@ class AlphaBot:
             'dn_15m':    round(dn_15m, 2),   'dn_1h':   round(dn_1h, 2),
             'dn_4h':     round(dn_4h, 2),    'dn_24h':  round(dn_24h, 2),
             'confirm_dir': confirm_dir,         # 'bull'/'bear'/'' — retest confirmation candle
+            'vwap_dist':   round(vwap_dist, 2),        # % distance from rolling VWAP
+            'last_candle_atr': round(last_candle_atr, 2),  # last 5m candle range / ATR
             'sig':       sig,
         }
 
@@ -1306,20 +1325,32 @@ class AlphaBot:
             m15, m1h, m4h, m24 = a.get('move_15m', 0), a.get('move_1h', 0), a.get('move_4h', 0), a.get('move_24h', 0)
         else:
             m15, m1h, m4h, m24 = a.get('dn_15m', 0), a.get('dn_1h', 0), a.get('dn_4h', 0), a.get('dn_24h', 0)
+        # NOTE: overextension fails are 'WAIT' not permanent rejects — the coin is
+        # re-analysed every scan (no cooldown) and enters once it pulls back.
         for mv, cap, lbl in ((m15, config.MOVE_15M_MAX, '15m'), (m1h, config.MOVE_1H_MAX, '1h'),
                              (m4h, config.MOVE_4H_MAX, '4h'), (m24, config.MOVE_24H_MAX, '24h')):
             if mv > cap and not is_runner:
-                self.emit('fail', f"{sym} {lbl} move {mv:.1f}% > {cap:.0f}% → overextended → SKIP"); return
+                self.emit('fail', f"{sym} {lbl} move {mv:.1f}% > {cap:.0f}% → extended, WAIT for pullback"); return
 
         # Distance from the 5m EMA20 — a trade far from its mean reverts to the SL
         ema_dist = a.get('ema_dist', 0)
         if ema_dist > config.EMA_DISTANCE_MAX and not is_runner:
-            self.emit('fail', f"{sym} {ema_dist:.1f}% from EMA20 > {config.EMA_DISTANCE_MAX:.0f}% → wait for pullback → SKIP"); return
+            self.emit('fail', f"{sym} {ema_dist:.1f}% from EMA20 > {config.EMA_DISTANCE_MAX:.0f}% → WAIT for pullback"); return
+
+        # Distance from rolling VWAP — price stretched from the volume-weighted mean
+        vwap_dist = a.get('vwap_dist', 0)
+        if vwap_dist > config.VWAP_DISTANCE_MAX and not is_runner:
+            self.emit('fail', f"{sym} {vwap_dist:.1f}% from VWAP > {config.VWAP_DISTANCE_MAX:.0f}% → WAIT for pullback"); return
+
+        # Last candle a climax spike (range > 1.8 ATR) — don't chase the spike
+        lc_atr = a.get('last_candle_atr', 0)
+        if lc_atr > config.LAST_CANDLE_ATR_MAX and not is_runner:
+            self.emit('fail', f"{sym} last candle {lc_atr:.1f} ATR > {config.LAST_CANDLE_ATR_MAX} → climax spike, WAIT"); return
 
         # Absolute 24h ticker change — don't jump into a coin that already flew
         chg24 = abs(self._change24.get(sym, 0.0))
         if chg24 > config.CHANGE_24H_MAX and not is_runner:
-            self.emit('fail', f"{sym} 24h change {chg24:.1f}% > {config.CHANGE_24H_MAX:.0f}% → already flew → SKIP"); return
+            self.emit('fail', f"{sym} 24h change {chg24:.1f}% > {config.CHANGE_24H_MAX:.0f}% → already flew, WAIT"); return
 
         # Composite EXTENSION SCORE — reject the sum of chase-signals
         ext_score = 0
