@@ -1098,9 +1098,8 @@ class AlphaBot:
         try:
             k = raw15[-2]                      # last closed 15m candle
             o, h, l, c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
-            rng = (h - l) or 1e-9
-            if c > o and (c - l) / rng > 0.55:   confirm_dir = 'bull'   # green, closed upper half
-            elif c < o and (h - c) / rng > 0.55: confirm_dir = 'bear'   # red, closed lower half
+            if c > o:   confirm_dir = 'bull'   # green candle
+            elif c < o: confirm_dir = 'bear'   # red candle
         except Exception:
             pass
         # Position within the last-24h range (0 = at low, 1 = at high)
@@ -1375,7 +1374,7 @@ class AlphaBot:
                     self.emit('fail', f"{sym} no bullish confirmation candle — waiting for retest hold → SKIP"); return
                 sups = [s for s in (srl.get('support') or []) if s <= a['price']]
                 near = max(sups) if sups else 0
-                retest_ok = (near and (a['price'] - near) / a['price'] * 100 < 4.0) or a.get('ema_dist', 99) < 2.0
+                retest_ok = (near and (a['price'] - near) / a['price'] * 100 < 6.0) or a.get('ema_dist', 99) < 3.0
                 if not retest_ok:
                     self.emit('fail', f"{sym} no support retest nearby — not a pullback entry → SKIP"); return
             else:
@@ -1383,7 +1382,7 @@ class AlphaBot:
                     self.emit('fail', f"{sym} no bearish confirmation candle — waiting for retest reject → SKIP"); return
                 res = [r for r in (srl.get('resistance') or []) if r >= a['price']]
                 near = min(res) if res else 0
-                retest_ok = (near and (near - a['price']) / a['price'] * 100 < 4.0) or a.get('ema_dist', 99) < 2.0
+                retest_ok = (near and (near - a['price']) / a['price'] * 100 < 6.0) or a.get('ema_dist', 99) < 3.0
                 if not retest_ok:
                     self.emit('fail', f"{sym} no resistance retest nearby — not a pullback entry → SKIP"); return
 
