@@ -445,6 +445,7 @@ class AlphaBot:
         self._blocked_signals: dict[str, float] = {}  # sym → ts: passed gates but no slot free
         self._retry_busy = False                   # re-entry guard for blocked-signal retry
         self._vol24: dict[str, float] = {}         # sym → 24h quote volume (liquidity tiering)
+        self._change24: dict[str, float] = {}      # sym → 24h price change %
         self._htf_cache: dict[str, tuple] = {}     # sym → (ts, h4_bull, d1_bull) higher-TF trend
         self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
         self._recently_closed: dict[str, float] = {}   # sym → close ts (reconcile ghost guard)
@@ -1032,6 +1033,7 @@ class AlphaBot:
         # Chart extension: how many ATRs is price stretched from its 5m EMA20?
         # Entries chasing a vertical candle mean-revert into the SL.
         ext_atr = 0.0
+        ema20_5 = price
         try:
             c5      = pd.Series([float(k[4]) for k in raw5])
             ema20_5 = float(c5.ewm(span=20, adjust=False).mean().iloc[-1])
@@ -1048,6 +1050,29 @@ class AlphaBot:
                 ext_1h = (price - ema20_1h) / atr_1h
         except Exception:
             pass
+
+        # ── Anti-chase measurements: runup from recent low over each window
+        # (mirror = drawdown from recent high). Used to reject overextended entries.
+        try:
+            lows15  = [float(k[3]) for k in raw15]
+            highs15 = [float(k[2]) for k in raw15]
+            lows1h  = [float(k[3]) for k in raw1h]
+            highs1h = [float(k[2]) for k in raw1h]
+            def _up(base):   return (price - base) / base * 100 if base > 0 else 0.0
+            def _dn(base):   return (base - price) / base * 100 if base > 0 else 0.0
+            move_15m = _up(min(lows15[-1:]))                    # last 15m candle
+            move_1h  = _up(min(lows15[-4:] or [price]))         # last ~1h
+            move_4h  = _up(min(lows1h[-4:] or [price]))         # last 4h
+            move_24h = _up(min(lows1h[-24:] or [price]))        # last 24h
+            dn_15m   = _dn(max(highs15[-1:]))
+            dn_1h    = _dn(max(highs15[-4:] or [price]))
+            dn_4h    = _dn(max(highs1h[-4:] or [price]))
+            dn_24h   = _dn(max(highs1h[-24:] or [price]))
+            ema_dist = abs(price - ema20_5) / ema20_5 * 100 if ema20_5 > 0 else 0.0
+        except Exception:
+            move_15m = move_1h = move_4h = move_24h = 0.0
+            dn_15m = dn_1h = dn_4h = dn_24h = 0.0
+            ema_dist = 0.0
         # Position within the last-24h range (0 = at low, 1 = at high)
         rng_pos = 0.5
         try:
@@ -1083,6 +1108,11 @@ class AlphaBot:
             'ext_atr':   round(ext_atr, 2),     # chart extension from 5m EMA20 (ATRs)
             'ext_1h':    round(ext_1h, 2),      # chart extension from 1h EMA20 (ATRs)
             'rng_pos':   round(rng_pos, 2),     # 0=24h low, 1=24h high
+            'ema_dist':  round(ema_dist, 2),    # % distance of price from 5m EMA20
+            'move_15m':  round(move_15m, 2), 'move_1h': round(move_1h, 2),
+            'move_4h':   round(move_4h, 2),  'move_24h': round(move_24h, 2),
+            'dn_15m':    round(dn_15m, 2),   'dn_1h':   round(dn_1h, 2),
+            'dn_4h':     round(dn_4h, 2),    'dn_24h':  round(dn_24h, 2),
             'sig':       sig,
         }
 
@@ -1237,6 +1267,57 @@ class AlphaBot:
         if a['atr_pct'] < 0.30:
             self.emit('fail', f"{sym} ATR={a['atr_pct']:.2f}% → too flat → SKIP"); return
 
+        # ── "Solana-type" RUNNER detection (needed by the anti-chase exemptions) —
+        # capitulation-reversal caught at the bottom (long) / top (short); gets the
+        # 20-50% ROI target and is exempt from the extension filters below.
+        BULL_REVERSAL = {'Morning Star', 'Three White Soldiers', 'Bullish Engulfing',
+                         'Hammer', 'Tweezer Bottom', 'Piercing Line', 'Inverted Hammer',
+                         'Bullish Harami'}
+        BEAR_REVERSAL = {'Evening Star', 'Three Black Crows', 'Bearish Engulfing',
+                         'Shooting Star', 'Tweezer Top', 'Dark Cloud Cover', 'Bearish Harami'}
+        _pats = set(a.get('patterns', []))
+        is_runner = conf >= config.RUNNER_MIN_CONF and (
+            (direction == 'long'  and (a['rsi'] <= 30 or (_pats & BULL_REVERSAL))) or
+            (direction == 'short' and (a['rsi'] >= 70 or (_pats & BEAR_REVERSAL)))
+        )
+
+        # ── TREND-STRENGTH gate: no real trend (ADX below threshold) → no trade
+        adx = a.get('adx', 0) or 0
+        if adx < config.ADX_MIN:
+            self.emit('fail', f"{sym} ADX={adx:.0f} < {config.ADX_MIN:.0f} → no trend → SKIP"); return
+
+        # ── ANTI-CHASE: reject entries that have already run too far, too fast.
+        # Longs measure runup from the recent low; shorts the drop from the high.
+        if direction == 'long':
+            m15, m1h, m4h, m24 = a.get('move_15m', 0), a.get('move_1h', 0), a.get('move_4h', 0), a.get('move_24h', 0)
+        else:
+            m15, m1h, m4h, m24 = a.get('dn_15m', 0), a.get('dn_1h', 0), a.get('dn_4h', 0), a.get('dn_24h', 0)
+        for mv, cap, lbl in ((m15, config.MOVE_15M_MAX, '15m'), (m1h, config.MOVE_1H_MAX, '1h'),
+                             (m4h, config.MOVE_4H_MAX, '4h'), (m24, config.MOVE_24H_MAX, '24h')):
+            if mv > cap and not is_runner:
+                self.emit('fail', f"{sym} {lbl} move {mv:.1f}% > {cap:.0f}% → overextended → SKIP"); return
+
+        # Distance from the 5m EMA20 — a trade far from its mean reverts to the SL
+        ema_dist = a.get('ema_dist', 0)
+        if ema_dist > config.EMA_DISTANCE_MAX and not is_runner:
+            self.emit('fail', f"{sym} {ema_dist:.1f}% from EMA20 > {config.EMA_DISTANCE_MAX:.0f}% → wait for pullback → SKIP"); return
+
+        # Absolute 24h ticker change — don't jump into a coin that already flew
+        chg24 = abs(self._change24.get(sym, 0.0))
+        if chg24 > config.CHANGE_24H_MAX and not is_runner:
+            self.emit('fail', f"{sym} 24h change {chg24:.1f}% > {config.CHANGE_24H_MAX:.0f}% → already flew → SKIP"); return
+
+        # Composite EXTENSION SCORE — reject the sum of chase-signals
+        ext_score = 0
+        if ema_dist > 3.0:            ext_score += 30
+        if m15 > 8.0:                ext_score += 30
+        if m1h > 15.0:               ext_score += 20
+        rsi_v = a.get('rsi', 50)
+        if (direction == 'long' and rsi_v > 72) or (direction == 'short' and rsi_v < 28):
+            ext_score += 20
+        if ext_score >= config.EXTENSION_REJECT and not is_runner:
+            self.emit('fail', f"{sym} extension score {ext_score} ≥ {config.EXTENSION_REJECT} → chasing → SKIP"); return
+
         is_major   = sym in config.MAJOR_LEVERAGE
         is_priority= sym in config.PRIORITY_SYMBOLS
         lev        = self.dynamic_leverage(sym, a['atr_pct'], a['confidence'])
@@ -1351,20 +1432,6 @@ class AlphaBot:
         has_strong_pattern = bool(set(a.get('patterns', [])) & STRONG_PATTERNS)
         if is_counter_trend and not has_strong_pattern and not btc_extreme_oversold and not btc_extreme_overbought:
             self.emit('fail', f"{sym} counter-trend without strong pattern → SKIP"); return
-
-        # ── "Solana-type" RUNNER detection — capitulation-reversal caught at the
-        # bottom (long) / top (short). These get the 20-50% ROI target instead of
-        # the 5-10% scalp: a coin that crashed and is turning has a big move ahead.
-        BULL_REVERSAL = {'Morning Star', 'Three White Soldiers', 'Bullish Engulfing',
-                         'Hammer', 'Tweezer Bottom', 'Piercing Line', 'Inverted Hammer',
-                         'Bullish Harami'}
-        BEAR_REVERSAL = {'Evening Star', 'Three Black Crows', 'Bearish Engulfing',
-                         'Shooting Star', 'Tweezer Top', 'Dark Cloud Cover', 'Bearish Harami'}
-        _pats = set(a.get('patterns', []))
-        is_runner = conf >= config.RUNNER_MIN_CONF and (
-            (direction == 'long'  and (a['rsi'] <= 30 or (_pats & BULL_REVERSAL))) or
-            (direction == 'short' and (a['rsi'] >= 70 or (_pats & BEAR_REVERSAL)))
-        )
 
         # ── Pattern-direction contradiction gate — don't LONG a topping candle.
         # MANA was bought on a 'Tweezer Top' (bearish reversal). If the candles
@@ -1846,9 +1913,9 @@ class AlphaBot:
         del self.positions[sym]
         self._save_positions()
         self._recently_closed[sym] = time.time()   # reconcile ghost guard
-        # Re-entry cooldown: 15 min after a loss, 5 min after any win — stops
-        # instant churn back into the same coin at a worse price.
-        self._sym_cooldown[sym] = time.time() + (900 if not is_win else 300)
+        # Re-entry cooldown: SL_COOLDOWN_MIN after a loss, 5 min after any win —
+        # stops revenge re-entry / churn back into the same coin.
+        self._sym_cooldown[sym] = time.time() + (config.SL_COOLDOWN_MIN * 60 if not is_win else 300)
         # A slot just freed — give queued (slot-blocked) signals a fresh shot
         if self._blocked_signals:
             asyncio.get_event_loop().create_task(self._retry_blocked())
@@ -2023,6 +2090,7 @@ class AlphaBot:
                 _tick = await asyncio.get_event_loop().run_in_executor(None, self.client.tickers_24h)
                 _prices = {t['symbol']: float(t['lastPrice']) for t in _tick if t.get('lastPrice')}
                 self._vol24 = {t['symbol']: float(t.get('quoteVolume', 0) or 0) for t in _tick}
+                self._change24 = {t['symbol']: float(t.get('priceChangePercent', 0) or 0) for t in _tick}
             except Exception:
                 pass
 
