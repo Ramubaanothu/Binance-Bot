@@ -391,7 +391,7 @@ def current_session() -> str:
 
 def session_min_conf() -> float:
     return {
-        'Asia':   config.MIN_CONFIDENCE + 5,
+        'Asia':   config.MIN_CONFIDENCE + 3,
         'Europe': config.MIN_CONFIDENCE - 2,
         'US':     config.MIN_CONFIDENCE - 5,
     }.get(current_session(), config.MIN_CONFIDENCE)
