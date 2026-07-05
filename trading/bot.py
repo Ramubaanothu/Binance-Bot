@@ -1233,6 +1233,135 @@ class AlphaBot:
         finally:
             self._retry_busy = False
 
+    # ══ BTC-ONLY PURE-CHART MODE ═══════════════════════════════════════════════
+    def btc_chart_read(self) -> dict | None:
+        """Pure price-action read of BTCUSDT across 1m/5m/15m/1h.
+        Each timeframe votes: price vs EMA20 (±1), market structure HH/HL vs
+        LH/LL (±1), last closed candle color (±0.5). Weighted total decides
+        direction; 1h carries the most weight (trend), 1m the least (trigger)."""
+        votes, candles = {}, {}
+        try:
+            for tf, n in (('1m', 60), ('5m', 60), ('15m', 60), ('1h', 60)):
+                raw    = self.client.klines('BTCUSDT', tf, n)
+                closes = [float(k[4]) for k in raw]
+                px     = closes[-1]
+                ema20  = float(pd.Series(closes).ewm(span=20, adjust=False).mean().iloc[-1])
+                s = 1.0 if px > ema20 else -1.0
+                # structure: last 10 candles vs the 10 before them
+                hh = max(closes[-10:]) > max(closes[-20:-10])
+                hl = min(closes[-10:]) > min(closes[-20:-10])
+                lh = max(closes[-10:]) < max(closes[-20:-10])
+                ll = min(closes[-10:]) < min(closes[-20:-10])
+                if hh and hl: s += 1.0     # uptrend structure
+                if lh and ll: s -= 1.0     # downtrend structure
+                k = raw[-2]                # last CLOSED candle color
+                s += 0.5 if float(k[4]) > float(k[1]) else -0.5
+                votes[tf] = s
+                candles[tf] = raw
+        except Exception as e:
+            log.debug(f"btc chart read: {e}")
+            return None
+        total = votes['1h'] * 0.40 + votes['15m'] * 0.30 + votes['5m'] * 0.20 + votes['1m'] * 0.10
+        # ATR from the 5m chart for exit geometry
+        r5  = candles['5m']
+        atr = sum(float(k[2]) - float(k[3]) for k in r5[-14:]) / 14
+        px  = float(r5[-1][4])
+        return {'votes': votes, 'score': round(total, 2),
+                'direction': 'long' if total > 0 else 'short',
+                'atr': atr, 'atr_pct': round(atr / px * 100, 3) if px else 0.2,
+                'price': px}
+
+    async def btc_chart_loop(self):
+        """Dedicated BTC-only loop: read the charts, take the direction, manage
+        via the normal exit engine. Altcoin scanner is paused in this mode."""
+        self.emit('info', '📊 BTC PURE-CHART MODE — alt scanner paused; reading 1m/5m/15m/1h')
+        arrows = lambda v: ' '.join(f"{tf}:{'↑' if v[tf] > 0 else '↓'}" for tf in ('1m', '5m', '15m', '1h'))
+        while self.running:
+            try:
+                self.check_daily()
+                self.scan_progress = {'done': 1, 'total': 1, 'sym': 'BTCUSDT'}
+                r = await asyncio.get_event_loop().run_in_executor(None, self.btc_chart_read)
+                if r:
+                    strong = abs(r['score']) >= config.BTC_CHART_MIN_SCORE
+                    # 1h and 15m must agree with the trade direction (trend TFs)
+                    aligned = (r['votes']['1h'] > 0 and r['votes']['15m'] > 0) if r['direction'] == 'long' \
+                              else (r['votes']['1h'] < 0 and r['votes']['15m'] < 0)
+                    self.emit('pass' if (strong and aligned) else 'info',
+                        f"📊 BTC {arrows(r['votes'])} | score {r['score']:+.2f} "
+                        f"→ {r['direction'].upper()} {'✓' if (strong and aligned) else '· waiting'}")
+                    if strong and aligned and 'BTCUSDT' not in self.positions:
+                        await self.open_btc_chart_position(r)
+                await self.push()
+            except Exception as e:
+                log.error(f"[BTC CHART] {e}")
+            await asyncio.sleep(config.BTC_CHART_INTERVAL)
+
+    async def open_btc_chart_position(self, r: dict):
+        """Slim chart-mode entry: no alt gates — the chart read IS the signal.
+        Reuses the same sizing, exits, and guard mechanics as the main path."""
+        sym = 'BTCUSDT'
+        if sym in self.positions or not self.guards_ok(): return
+        if time.time() < self._sym_cooldown.get(sym, 0): return
+        direction = r['direction']
+        conf      = min(95.0, abs(r['score']) / 2.5 * 100)
+        lev       = config.BTC_CHART_LEV
+
+        try:
+            venue_px = self.client.price(sym)
+        except Exception:
+            self.emit('warn', 'BTC venue price failed — retry next read'); return
+        atr   = r['atr'] * (venue_px / r['price']) if r['price'] else r['atr']
+        exits = self.compute_exits(direction, venue_px, atr, sym)
+        sl_dist = abs(venue_px - exits['sl'])
+
+        risk_usd = self.balance * config.RISK_PER_TRADE_PCT / 100
+        notional = risk_usd / max(sl_dist / venue_px, 1e-6)
+        notional = min(notional, self.balance * lev * 0.20)
+        notional = max(notional, config.MIN_NOTIONAL_USDT)
+        qty = self.client.round_qty(sym, notional / venue_px)
+        if qty <= 0:
+            self.emit('warn', f"BTC qty=0 bal=${self.balance:.2f}"); return
+
+        try:
+            self.client.set_margin_type(sym)
+            self.client.set_leverage(sym, lev)
+        except: pass
+        try:
+            resp = self.client.market_order(sym, 'BUY' if direction == 'long' else 'SELL',
+                                            qty, current_price=venue_px)
+        except Exception as e:
+            self.emit('warn', f"BTC order FAIL: {e}"); return
+
+        entry = float(resp.get('avgPrice') or venue_px) or venue_px
+        exits = self.compute_exits(direction, entry, atr, sym)
+        self.positions[sym] = {
+            'symbol': sym, 'direction': direction, 'entry': entry, 'current': entry,
+            'peak': entry, 'runner': False, 'qty': qty,
+            'size_usd': round(qty * entry, 4), 'leverage': lev, 'is_major': True,
+            'sl': exits['sl'], 'tp1': exits['tp1'], 'tp2': exits['tp2'], 'tp3': exits['tp3'],
+            'trail_sl': exits['sl'], 'trail_dist': exits['trail_dist'],
+            'be_locked': False, 'tp1_hit': False, 'tp2_hit': False,
+            'phase': 'open', 'pnl_pct': 0.0, 'pnl_usd': 0.0,
+            'conf': round(conf, 1), 'regime': 'chart', 'patterns': [],
+            'atr': atr, 'atr_pct': r['atr_pct'], 'adx': 0, 'rsi': 0,
+            'cloud_bull': direction == 'long', 'squeeze': False,
+            'funding': 0, 'ls_ratio': 1.0, 'oi_bias': 0,
+            'pivot': {}, 'open_time': datetime.now().strftime('%H:%M:%S'),
+            'open_ms': int(time.time() * 1000), 'session': current_session(),
+            'vol_ratio': 1.0, 'rr_ratio': round(abs(exits['tp1'] - entry) / sl_dist, 2) if sl_dist else 0,
+            'order_id': resp.get('orderId', ''), 'sl_order_id': '', 'tp1_order_id': '',
+        }
+        self._place_exchange_guards(sym, self.positions[sym])
+        self._save_positions()
+        self.balance = self.client.usdt_balance(self.paper_balance)
+        v = r['votes']
+        self.emit('exec',
+            f"📊[CHART] {'LONG' if direction == 'long' else 'SHORT'} BTCUSDT @ {entry:.2f} | "
+            f"qty={qty} lev={lev}x | score {r['score']:+.2f} ({conf:.0f}%) | "
+            f"1m:{'↑' if v['1m']>0 else '↓'} 5m:{'↑' if v['5m']>0 else '↓'} "
+            f"15m:{'↑' if v['15m']>0 else '↓'} 1h:{'↑' if v['1h']>0 else '↓'} | "
+            f"SL={exits['sl']:.2f} TP1={exits['tp1']:.2f}")
+
     async def open_position(self, a: dict):
         sym = a['symbol']
         if sym in self.positions: return
@@ -2444,7 +2573,10 @@ class AlphaBot:
         print("  Open: terminal.html in Chrome")
         print(sep)
         # Run scan loop; server runs in background as long as event loop is alive
-        await self.scan_loop()
+        if getattr(config, 'BTC_ONLY_MODE', False):
+            await self.btc_chart_loop()     # pure-chart BTC mode — alt scanner paused
+        else:
+            await self.scan_loop()
 
 
 if __name__ == '__main__':
