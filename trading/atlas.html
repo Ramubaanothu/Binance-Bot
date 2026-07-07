@@ -6,176 +6,165 @@
 <title>ATLAS — AlphaBot Dashboard</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
+  @keyframes dot-beat { 0%,100% { transform:scale(1); box-shadow:0 0 0 0 rgba(0,255,204,0.6); } 50% { transform:scale(1.25); box-shadow:0 0 0 6px rgba(0,255,204,0); } }
   @keyframes top-sweep { 0%,100% { background-position:0% 50%; } 50% { background-position:100% 50%; } }
-  @keyframes dot-beat  { 0%,100% { transform:scale(1); opacity:1; box-shadow:0 0 0 0 rgba(0,255,204,0.7); } 50% { transform:scale(1.3); opacity:0.8; box-shadow:0 0 0 6px rgba(0,255,204,0); } }
-  @keyframes fade-up   { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
-  @keyframes sig-in    { from { opacity:0; transform:translateX(-10px); background:rgba(0,255,204,0.08); } to { opacity:1; transform:translateX(0); background:transparent; } }
-  @keyframes strength-fill { from { width:0%; } }
-  @keyframes ping      { 0% { transform:scale(1); opacity:1; } 70%,100% { transform:scale(2.2); opacity:0; } }
 
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { zoom:1.15; background:#04040a; overflow:hidden; font-family:'DM Sans',sans-serif; color:#3a3a5a; }
-  ::-webkit-scrollbar { width:2px; height:2px; }
+  html,body { height:100%; }
+  body { background:#05050d; font-family:'DM Sans',sans-serif; color:#4a4a72; font-size:12px; overflow:hidden; }
+  ::-webkit-scrollbar { width:4px; height:4px; }
   ::-webkit-scrollbar-track { background:transparent; }
-  ::-webkit-scrollbar-thumb { background:rgba(0,255,204,0.2); }
+  ::-webkit-scrollbar-thumb { background:rgba(0,255,204,0.25); border-radius:2px; }
 
-  .app { height:100vh; display:flex; flex-direction:column; position:relative; overflow:hidden; }
-  .sweep { height:2px; flex-shrink:0; background:linear-gradient(90deg,transparent,#00ffcc,#7000ff,#ff0080,#00ffcc,transparent); background-size:200% 100%; animation:top-sweep 6s ease infinite; }
-
-  /* status bar */
-  .statusbar { display:flex; align-items:center; padding:0 18px; height:36px; background:rgba(4,4,14,0.98); border-bottom:1px solid rgba(0,255,204,0.07); flex-shrink:0; position:relative; z-index:10; font-size:10px; }
-  .beat { width:7px; height:7px; border-radius:50%; background:#00ffcc; animation:dot-beat 2s ease-in-out infinite; flex-shrink:0; }
-  .beat.dead { background:#ff0080; box-shadow:none; animation:none; }
-  .vdiv { width:1px; height:16px; background:rgba(0,255,204,0.1); margin:0 18px; flex-shrink:0; }
-
-  .main { flex:1; display:flex; min-height:0; overflow:hidden; }
-  .left { width:36%; display:flex; flex-direction:column; border-right:1px solid rgba(0,255,204,0.07); background:rgba(6,6,18,0.96); overflow:hidden; }
-  .chartwrap { flex:1; position:relative; overflow:hidden; background:#02020a; }
-  .chartwrap canvas { position:absolute; top:0; left:0; width:100%; height:100%; display:block; }
-
-  .poscard { border:1px solid rgba(0,255,204,0.08); padding:12px 14px; position:relative; animation:fade-up 0.5s ease; }
-  .poscard:hover { background:rgba(0,255,204,0.03); }
-
-  .sigcard { flex-shrink:0; width:190px; height:70px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; position:relative; overflow:hidden; }
-
-  .tradecell { padding:8px 12px; border-right:1px solid rgba(255,0,128,0.05); transition:background 0.15s; overflow:hidden; }
-  .tradecell:hover { background:rgba(255,0,128,0.04); }
-
-  .mono { font-family:'JetBrains Mono',monospace; }
+  .mono  { font-family:'JetBrains Mono',monospace; }
   .bebas { font-family:'Bebas Neue',sans-serif; }
-  .lbl { color:#1a1a3a; font-size:8px; letter-spacing:0.16em; }
+  .lbl   { color:#2a2a4e; font-size:9px; letter-spacing:0.16em; font-weight:600; }
+
+  /* App grid: everything locked to the viewport - nothing can overflow */
+  .app {
+    height:100vh; display:grid; overflow:hidden;
+    grid-template-rows: 3px 42px 50vh minmax(0,1fr) 150px 26px;
+  }
+  .sweep { background:linear-gradient(90deg,transparent,#00ffcc,#7000ff,#ff0080,transparent); background-size:200% 100%; animation:top-sweep 7s ease infinite; }
+
+  .statusbar { display:flex; align-items:center; gap:16px; padding:0 16px; background:#070714; border-bottom:1px solid rgba(0,255,204,0.08); font-size:11px; white-space:nowrap; overflow:hidden; }
+  .beat { width:8px; height:8px; border-radius:50%; background:#00ffcc; animation:dot-beat 2s ease-in-out infinite; }
+  .beat.dead { background:#ff0080; animation:none; }
+  .sb-item b { color:#c8c8f0; font-weight:600; }
+
+  /* CHART = exactly 50vh, hero + intel as overlays */
+  .chartrow { position:relative; border-bottom:1px solid rgba(0,255,204,0.08); background:#03030c; min-height:0; }
+  .chartrow canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .hero {
+    position:absolute; top:14px; left:18px; z-index:5; pointer-events:none;
+    background:rgba(5,5,16,0.55); backdrop-filter:blur(3px); padding:10px 16px 12px; border-left:2px solid #00ffcc;
+  }
+  .intel { position:absolute; top:14px; right:18px; z-index:5; display:flex; gap:14px; font-size:10px;
+    background:rgba(5,5,16,0.55); backdrop-filter:blur(3px); padding:8px 14px; border-right:2px solid #7000ff; }
+  .chartfoot { position:absolute; left:18px; bottom:10px; z-index:5; display:flex; gap:18px; font-size:10px; }
+
+  /* MIDDLE: positions | gauges | signal feed */
+  .mid { display:grid; grid-template-columns: 30% 19% 1fr; min-height:0; border-bottom:1px solid rgba(255,0,128,0.08); }
+  .col { display:flex; flex-direction:column; min-height:0; border-right:1px solid rgba(0,255,204,0.06); }
+  .colhead { display:flex; align-items:center; gap:8px; padding:7px 14px; border-bottom:1px solid rgba(0,255,204,0.06); flex-shrink:0; }
+  .colbody { flex:1; overflow-y:auto; min-height:0; padding:8px 12px; }
+
+  .poscard { border:1px solid rgba(0,255,204,0.1); padding:10px 12px; margin-bottom:8px; background:rgba(0,255,204,0.015); }
+  .poscard:hover { background:rgba(0,255,204,0.04); }
+
+  /* signal feed = wrapping card grid, scrolls vertically */
+  #sig-cards { display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; }
+  .sigcard { width:206px; height:72px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; position:relative; overflow:hidden; background:rgba(255,255,255,0.015); }
+
+  /* TRADES: horizontal scroll strip pinned inside its grid row */
+  .traderow { display:flex; flex-direction:column; min-height:0; }
+  #trade-grid { flex:1; display:grid; grid-auto-flow:column; grid-auto-columns:minmax(152px,1fr); overflow-x:auto; overflow-y:hidden; min-height:0; }
+  .tradecell { padding:8px 12px; border-right:1px solid rgba(255,0,128,0.08); overflow:hidden; }
+  .tradecell:hover { background:rgba(255,0,128,0.05); }
+
+  .footer { display:flex; align-items:center; gap:18px; padding:0 16px; font-size:10px; border-top:1px solid rgba(0,255,204,0.07); background:#070714; white-space:nowrap; overflow:hidden; }
 </style>
 </head>
 <body>
 <div class="app">
   <div class="sweep"></div>
 
-  <!-- ══ STATUS BAR ══ -->
+  <!-- STATUS BAR -->
   <div class="statusbar">
-    <div style="display:flex; align-items:center; gap:7px; flex-shrink:0; margin-right:22px">
-      <div class="beat" id="conn-dot"></div>
-      <span style="color:#00ffcc; font-weight:700; font-size:12px; letter-spacing:0.22em">ATLAS</span>
-      <span style="color:#1a1a3a; font-size:9px" id="mode-badge">v5.0</span>
+    <span style="display:flex; align-items:center; gap:8px"><span class="beat" id="conn-dot"></span>
+      <span style="color:#00ffcc; font-weight:700; font-size:13px; letter-spacing:0.22em">ATLAS</span>
+      <span style="color:#2a2a4e; font-size:9px" id="mode-badge">v5.0</span></span>
+    <span class="sb-item">BAL <b class="bebas" style="font-size:15px; color:#e8e8ff" id="sb-bal">$--</b></span>
+    <span class="sb-item">DAY <b id="sb-day">--</b></span>
+    <span class="sb-item">TOTAL <b id="sb-total">--</b></span>
+    <span class="sb-item">ALL-TIME <b id="sb-sess">--</b></span>
+    <span class="sb-item">BTC <b style="color:#f7c948" id="sb-btc">--</b></span>
+    <span class="sb-item">WR <b style="color:#f59e0b" id="sb-wr">--</b></span>
+    <span class="sb-item" id="sb-wl">0W / 0L</span>
+    <span class="sb-item">POS <b style="color:#00ffcc" id="sb-pos">0</b></span>
+    <span class="sb-item">SCAN <b style="color:#a06bff" id="sb-scan">#0</b></span>
+    <span style="margin-left:auto; display:flex; align-items:center; gap:12px">
+      <span style="color:#06b6d4" id="sb-session">-- SESSION</span>
+      <span class="bebas" style="color:#00ffcc; font-size:14px; letter-spacing:0.18em" id="sb-time">--:--:--</span></span>
+  </div>
+
+  <!-- CHART - 50% of the screen -->
+  <div class="chartrow">
+    <canvas id="chart"></canvas>
+    <div class="hero">
+      <div class="lbl">ACCOUNT BALANCE &middot; BINANCE DAY-1</div>
+      <div class="bebas" style="font-size:46px; line-height:1.05; color:#e8e8ff"><span style="color:#00ffcc">$</span><span id="hero-int">--</span><span style="color:#3a3a6e; font-size:32px" id="hero-dec">.00</span></div>
+      <div style="display:flex; gap:16px; margin-top:6px; font-size:12px">
+        <span><b style="font-weight:700" id="hero-day">--</b> <span class="lbl" style="font-size:8px">DAY</span></span>
+        <span><b style="font-weight:700" id="hero-total">--</b> <span class="lbl" style="font-size:8px">TOTAL</span></span>
+        <span><b style="font-weight:700" id="hero-sess">--</b> <span class="lbl" style="font-size:8px">ALL-TIME</span></span>
+      </div>
     </div>
-    <div class="vdiv" style="margin-left:0"></div>
-    <div style="display:flex; align-items:baseline; gap:4px; flex-shrink:0; margin-right:18px">
-      <span class="lbl" style="font-size:8px">BAL</span>
-      <span class="bebas" style="color:#e0e0ff; font-size:14px; letter-spacing:0.05em" id="sb-bal">$—</span>
+    <div class="intel">
+      <span>1H <b id="mi-1h" style="font-weight:700">--</b></span>
+      <span>4H <b id="mi-4h" style="font-weight:700">--</b></span>
+      <span>1D <b id="mi-1d" style="font-weight:700">--</b></span>
+      <span>BTC 10m <b id="mi-btc" style="font-weight:700">--</b></span>
+      <span>F&amp;G <b id="mi-fng" style="color:#f59e0b; font-weight:700">--</b></span>
     </div>
-    <div style="display:flex; gap:16px; flex-shrink:0">
-      <span>DAY <span style="font-weight:600" id="sb-day">—</span></span>
-      <span>TOTAL <span style="font-weight:600" id="sb-total">—</span></span>
-      <span>SESSION <span style="font-weight:600" id="sb-sess">—</span></span>
-    </div>
-    <div class="vdiv"></div>
-    <div style="display:flex; gap:14px; flex-shrink:0">
-      <span>WR <span style="color:#f59e0b; font-weight:600" id="sb-wr">—</span></span>
-      <span id="sb-wl">0W / 0L</span>
-      <span>POS <span style="color:#00ffcc; font-weight:600" id="sb-pos">0</span></span>
-      <span>SCAN <span style="color:#7000ff; font-weight:600" id="sb-scan">#0</span></span>
-      <span>BTC <span style="color:#f7c948; font-weight:700" id="sb-btc">—</span></span>
-    </div>
-    <div style="margin-left:auto; display:flex; align-items:center; gap:10px; flex-shrink:0">
-      <span style="color:#06b6d4" id="sb-session">— SESSION</span>
-      <div style="width:1px; height:14px; background:rgba(0,255,204,0.1)"></div>
-      <span class="bebas" style="color:#00ffcc; font-size:13px; letter-spacing:0.2em" id="sb-time">--:--:-- UTC</span>
+    <div class="chartfoot mono">
+      <span>Hi <span style="color:#00ffcc" id="chart-hi">--</span></span>
+      <span>Lo <span style="color:#ff0080" id="chart-lo">--</span></span>
+      <span id="chart-sess" style="color:#4a4a72">--</span>
     </div>
   </div>
 
-  <!-- ══ MAIN ══ -->
-  <div class="main">
-    <!-- LEFT -->
-    <div class="left">
-      <!-- Balance hero -->
-      <div style="padding:12px 18px 10px; border-bottom:1px solid rgba(0,255,204,0.06); flex-shrink:0; background:rgba(0,255,204,0.015)">
-        <div class="lbl" style="letter-spacing:0.18em; margin-bottom:2px">ACCOUNT BALANCE</div>
-        <div class="bebas" style="font-size:54px; letter-spacing:0.03em; line-height:1; color:#e8e8ff"><span style="color:#00ffcc">$</span><span id="hero-int">—</span><span style="color:#2a2a6a; font-size:40px" id="hero-dec">.00</span></div>
-        <div style="display:flex; gap:18px; margin-top:10px">
-          <div><div style="font-size:14px; font-weight:700; line-height:1" id="hero-day">—</div><div class="lbl" style="font-size:7px; margin-top:2px">DAY P&amp;L</div></div>
-          <div style="width:1px; background:rgba(0,255,204,0.08)"></div>
-          <div><div style="font-size:14px; font-weight:700; line-height:1" id="hero-total">—</div><div class="lbl" style="font-size:7px; margin-top:2px">TOTAL P&amp;L</div></div>
-          <div style="width:1px; background:rgba(0,255,204,0.08)"></div>
-          <div><div style="font-size:14px; font-weight:700; line-height:1" id="hero-sess">—</div><div class="lbl" style="font-size:7px; margin-top:2px">SESSION</div></div>
-        </div>
+  <!-- MIDDLE -->
+  <div class="mid">
+    <div class="col">
+      <div class="colhead">
+        <span style="color:#00ffcc; font-size:10px; font-weight:700; letter-spacing:0.18em">POSITIONS</span>
+        <span style="color:#00ffcc; font-size:10px; background:rgba(0,255,204,0.08); padding:1px 7px" id="pos-count">0/5</span>
+        <span style="color:#00ffcc; font-size:10px" id="pos-long">0L</span>
+        <span style="color:#ff0080; font-size:10px" id="pos-short">0S</span>
+        <span style="margin-left:auto; font-size:10px; font-weight:700" id="pos-pnl">+0.00$</span>
       </div>
-
-      <!-- Positions header -->
-      <div style="display:flex; align-items:center; gap:8px; padding:7px 20px; border-bottom:1px solid rgba(0,255,204,0.05); flex-shrink:0">
-        <span style="color:#00ffcc; font-size:9px; font-weight:700; letter-spacing:0.18em">POSITIONS</span>
-        <span style="color:#00ffcc; font-size:9px; background:rgba(0,255,204,0.08); padding:1px 6px" id="pos-count">0/5</span>
-        <span style="color:#00ffcc; font-size:9px" id="pos-long">0L</span>
-        <span style="color:#ff0080; font-size:9px" id="pos-short">0S</span>
-        <span style="margin-left:auto; font-size:9px; font-weight:600" id="pos-pnl">+0.00$</span>
-      </div>
-      <div style="flex:1; overflow-y:auto; padding:8px 14px; display:flex; flex-direction:column; gap:8px" id="pos-list">
-        <div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions</div>
-      </div>
-
-      <!-- Gauges -->
-      <div style="padding:10px 20px 12px; border-top:1px solid rgba(0,255,204,0.06); flex-shrink:0">
-        <div class="lbl" style="margin-bottom:8px">GAUGES</div>
-        <div id="gauges"></div>
+      <div class="colbody" id="pos-list"></div>
+    </div>
+    <div class="col">
+      <div class="colhead"><span class="lbl">GAUGES</span></div>
+      <div style="padding:12px 16px; flex-shrink:0" id="gauges"></div>
+      <div class="colhead" style="border-top:1px solid rgba(0,255,204,0.06)"><span class="lbl">FEED STATS</span></div>
+      <div style="padding:10px 16px; display:flex; flex-direction:column; gap:8px; font-size:11px">
+        <span>SIGNALS <b style="color:#00ffcc; float:right" id="cnt-sig">0</b></span>
+        <span>FILTERS <b style="color:#f59e0b; float:right" id="cnt-fil">0</b></span>
+        <span>ALERTS <b style="color:#ff0080; float:right" id="cnt-alr">0</b></span>
+        <span class="mono" style="color:#2a2a4e; font-size:9px" id="feed-scan">--</span>
       </div>
     </div>
-
-    <!-- RIGHT: CHART -->
-    <div class="chartwrap">
-      <canvas id="chart"></canvas>
-      <div style="position:absolute; top:10px; right:14px; display:flex; gap:12px; font-size:9px; z-index:2" id="mkt-info">
-        <span style="color:#1a1a3a">1H: <span id="mi-1h" style="color:#f59e0b">—</span></span>
-        <span style="color:#1a1a3a">4H: <span id="mi-4h" style="color:#f59e0b">—</span></span>
-        <span style="color:#1a1a3a">DAILY: <span id="mi-1d" style="color:#00ffcc; font-weight:600">—</span></span>
-        <span style="color:#1a1a3a">BTC 10m: <span id="mi-btc" style="color:#3a3a6a">—</span></span>
-        <span style="color:#1a1a3a">F&amp;G: <span id="mi-fng" style="color:#f59e0b">—</span></span>
+    <div class="col" style="border-right:none">
+      <div class="colhead">
+        <span style="color:#a06bff; font-size:10px; font-weight:700; letter-spacing:0.18em">&#9679; SIGNAL FEED</span>
+        <span class="lbl" style="margin-left:auto">newest first &middot; scrolls</span>
       </div>
-      <div style="position:absolute; bottom:10px; left:14px; display:flex; gap:16px; font-size:9px; z-index:2">
-        <span style="color:#1a1a3a">Hi <span style="color:#00ffcc" id="chart-hi">—</span></span>
-        <span style="color:#1a1a3a">Lo <span style="color:#ff0080" id="chart-lo">—</span></span>
-        <span style="color:#1a1a3a" id="chart-sess">Session +0.00%</span>
-      </div>
+      <div class="colbody" id="sig-cards"></div>
     </div>
   </div>
 
-  <!-- ══ SIGNAL FEED ══ -->
-  <div style="height:88px; border-top:1px solid rgba(0,255,204,0.1); background:rgba(3,3,12,0.98); flex-shrink:0; display:flex; overflow:hidden; position:relative">
-    <div style="width:82px; flex-shrink:0; border-right:1px solid rgba(0,255,204,0.07); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 10px; background:rgba(0,255,204,0.02)">
-      <div style="position:relative; display:flex; align-items:center; justify-content:center">
-        <div class="beat" style="animation-duration:1.8s; position:relative; z-index:1; width:8px; height:8px"></div>
-        <div style="position:absolute; width:8px; height:8px; border-radius:50%; background:#00ffcc; animation:ping 1.8s ease-out infinite"></div>
-      </div>
-      <span style="color:#00ffcc; font-size:8px; font-weight:700; letter-spacing:0.2em; text-align:center; line-height:1.3">SIGNAL<br>FEED</span>
-      <span class="mono" style="color:#1a1a3a; font-size:8px" id="feed-scan">#0</span>
+  <!-- TRADES strip -->
+  <div class="traderow">
+    <div class="colhead" style="border-bottom:1px solid rgba(255,0,128,0.08)">
+      <span style="color:#ff0080; font-size:10px; font-weight:700; letter-spacing:0.18em">TRADES</span>
+      <span style="font-size:10px" id="tr-wl">0W / 0L</span>
+      <span style="color:#f59e0b; font-size:10px" id="tr-wr">WR --</span>
+      <span style="font-size:10px; font-weight:700" id="tr-total">Total --</span>
+      <span style="font-size:10px" id="tr-pf">PF --</span>
+      <span style="font-size:10px" id="tr-avg">--</span>
+      <span class="lbl" style="margin-left:auto">last 24 &middot; scroll &rarr;</span>
     </div>
-    <div style="flex:1; overflow-x:auto; overflow-y:hidden; display:flex; align-items:center; padding:0 8px; gap:6px; scrollbar-width:thin" id="sig-cards"></div>
-    <div style="width:80px; flex-shrink:0; border-left:1px solid rgba(0,255,204,0.07); display:flex; flex-direction:column; justify-content:center; gap:8px; padding:0 12px; background:rgba(0,255,204,0.01)">
-      <div><div class="lbl" style="font-size:7px">SIGNALS</div><div class="bebas" style="color:#00ffcc; font-size:16px; line-height:1" id="cnt-sig">0</div></div>
-      <div><div class="lbl" style="font-size:7px">FILTERS</div><div class="bebas" style="color:#f59e0b; font-size:16px; line-height:1" id="cnt-fil">0</div></div>
-      <div><div class="lbl" style="font-size:7px">ALERTS</div><div class="bebas" style="color:#ff0080; font-size:16px; line-height:1" id="cnt-alr">0</div></div>
-    </div>
+    <div id="trade-grid"></div>
   </div>
 
-  <!-- ══ TRADES ══ -->
-  <div style="height:108px; border-top:1px solid rgba(255,0,128,0.08); background:rgba(4,4,10,0.98); flex-shrink:0; overflow:hidden">
-    <div style="display:flex; align-items:center; gap:10px; padding:4px 18px 3px; border-bottom:1px solid rgba(255,0,128,0.06); font-size:9px">
-      <span style="color:#ff0080; font-weight:700; letter-spacing:0.18em">TRADES</span>
-      <span style="color:#1a1a3a" id="tr-wl">0W / 0L</span>
-      <span style="color:#f59e0b" id="tr-wr">WR 0%</span>
-      <span id="tr-total">Total +0.00$</span>
-      <span style="color:#1a1a3a" id="tr-pf">PF —</span>
-      <span style="color:#1a1a3a" id="tr-avg">AvgW — / AvgL —</span>
-    </div>
-    <div style="display:grid; grid-template-columns:repeat(6,1fr); grid-auto-rows:min-content; height:calc(100% - 24px); overflow-y:auto; scrollbar-width:thin" id="trade-grid"></div>
-  </div>
-
-  <!-- ══ FOOTER ══ -->
-  <div style="display:flex; align-items:center; padding:0 18px; height:24px; background:rgba(2,2,8,0.99); border-top:1px solid rgba(0,255,204,0.05); flex-shrink:0; font-size:8.5px; color:#1a1a3a; gap:14px">
-    <span id="ft-status">CONNECTING…</span>
+  <!-- FOOTER -->
+  <div class="footer">
+    <span style="display:flex; align-items:center; gap:6px"><span class="beat" id="ft-dot" style="width:6px; height:6px"></span><span id="ft-status">connecting...</span></span>
     <span id="ft-pause"></span>
-    <div style="margin-left:auto; display:flex; align-items:center; gap:8px">
-      <span style="color:#00ffcc; font-weight:700; letter-spacing:0.1em" id="ft-exch">BINANCE</span>
-      <span>ws://localhost:8765</span>
-      <div class="beat" style="width:5px; height:5px; border-radius:0; animation-duration:3s" id="ft-dot"></div>
-    </div>
+    <span style="margin-left:auto" id="ft-exch">BINANCE &middot; TESTNET</span>
   </div>
 </div>
 
