@@ -1273,7 +1273,7 @@ class AlphaBot:
             deduped, last_tr = [], None
             for r in inc:
                 if r.get('incomeType') == 'TRANSFER':
-                    key = (r.get('income'), int(r['time']) // 10)
+                    key = (r.get('income'), int(r['time']) // 10000)   # 10-second bucket
                     if last_tr == key:
                         continue
                     last_tr = key
