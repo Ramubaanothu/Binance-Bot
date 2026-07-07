@@ -863,28 +863,61 @@ def _stats(S: dict) -> Panel:
 # ─── Panel: Balance Chart (full-width line chart) ─────────────────────────────
 _AREA_BLK = ' ▁▂▃▄▅▆▇█'   # 1/8-cell fill levels
 
-def _area_chart(vals, w, h, start_val):
-    """Line-with-fill chart: a BRIGHT surface line rides on a DIM filled area.
-    1/8-cell vertical resolution, continuous (no empty gaps). Teal above the
-    wallet-start level, pink below. Returns Text rows top→bottom."""
+def _area_chart(vals, w, h, start_val, ts=None):
+    """ADVANCED wallet tracker: bright surface line on a depth-graded area
+    (brighter near the surface, darker below), dashed start-capital baseline,
+    ▲ATH / ▼low markers, and day tick marks. Returns (rows, lo, hi, extras)."""
     lo, hi = min(vals), max(vals)
     rng = (hi - lo) or 1.0
     n = len(vals)
-    sampled = [vals[min(n - 1, int(i * n / w))] for i in range(w)] if n else []
+    idxs    = [min(n - 1, int(i * n / w)) for i in range(w)] if n else []
+    sampled = [vals[i] for i in idxs]
     rows = [Text() for _ in range(h)]
     sub_total = h * 8
-    for v in sampled:
-        level = max(1.0, (v - lo) / rng * sub_total)     # ≥1 → no empty column
-        line  = TEAL if v >= start_val else PINK          # bright surface line
-        body  = '#0c3b32' if v >= start_val else '#3a0e22'   # dim area fill
-        top_r = h - 1 - int((level - 0.001) // 8)         # row of the surface
-        for r in range(h):                                # r=0 = top row
+    # depth-graded fills (teal family above start, pink family below)
+    TEAL_GRAD = ['#0a2f28', '#0d4438', '#11594a']   # deep → near-surface
+    PINK_GRAD = ['#2a0a1a', '#3f0e26', '#571434']
+    # start-capital baseline row
+    base_r = h - 1 - int(max(0.0, min(sub_total - 1, (start_val - lo) / rng * sub_total)) // 8)
+    # ATH / low marker columns
+    c_hi = sampled.index(max(sampled)) if sampled else 0
+    c_lo = sampled.index(min(sampled)) if sampled else 0
+    # day-boundary tick columns
+    day_cols = set()
+    if ts:
+        import datetime as _dt
+        days = [_dt.datetime.fromtimestamp(ts[i]).date() for i in idxs]
+        day_cols = {c for c in range(1, w) if days[c] != days[c - 1]}
+
+    for c, v in enumerate(sampled):
+        level = max(1.0, (v - lo) / rng * sub_total)
+        up    = v >= start_val
+        grad  = TEAL_GRAD if up else PINK_GRAD
+        line  = TEAL if up else PINK
+        top_r = h - 1 - int((level - 0.001) // 8)
+        for r in range(h):
             fill = level - (h - 1 - r) * 8
             if fill <= 0:
-                rows[r].append(' ')
+                # empty sky: markers, baseline, day ticks
+                if c == c_hi and r == max(0, top_r - 1):
+                    rows[r].append('▼' if False else '▲', style=f'bold {TEAL}')
+                elif r == base_r and (c % 3 == 0):
+                    rows[r].append('╌', style='#3a3a5a')       # start-capital dashed line
+                elif c in day_cols and r == 0:
+                    rows[r].append('┆', style='#2a2a4a')       # day boundary tick
+                else:
+                    rows[r].append(' ')
             else:
                 ch = '█' if fill >= 8 else _AREA_BLK[int(fill)]
-                rows[r].append(ch, style=line if r == top_r else body)
+                if r == top_r:
+                    st = f'bold {line}'
+                else:
+                    depth = top_r and (r - top_r) or 1
+                    st = grad[max(0, len(grad) - 1 - min(len(grad) - 1, depth))]
+                if c == c_lo and r == top_r:
+                    rows[r].append(ch, style=f'bold {PINK}')
+                else:
+                    rows[r].append(ch, style=st)
     return rows, lo, hi
 
 
@@ -941,13 +974,31 @@ def _balance_chart(S: dict) -> Panel:
                      border_style='#123a33', expand=True)
 
     start_val = start_cap   # teal above starting capital, pink below (honest)
-    CHART_H = 6      # taller = squarer, solid filled area
-    CHART_W = 96     # narrower than full width so it reads as a block, not a long thread
+    CHART_H = 6
+    CHART_W = 110
 
-    rows, lo, hi = _area_chart(vals, CHART_W, CHART_H, start_val)
+    tss = [t for t, _ in _balance_history]
+    rows, lo, hi = _area_chart(vals, CHART_W, CHART_H, start_val, ts=tss)
     max_lw = len(f'${hi:,.0f}')
     # y-labels spread across the rows (top=hi … bottom=lo)
     y_labels = [f'${hi - (hi-lo)*i/(CHART_H-1):,.0f}' for i in range(CHART_H)]
+
+    # Advanced stats: max drawdown of the recorded curve + recovery off the low
+    peak_run, curve_dd = (vals[0] or 1), 0.0
+    for v in vals:
+        peak_run = max(peak_run, v)
+        if peak_run: curve_dd = max(curve_dd, (peak_run - v) / peak_run * 100)
+    recov = (vals[-1] - lo) / lo * 100 if lo else 0.0
+    stats.append('  MaxDD ', style=FAINT)
+    stats.append(f'-{curve_dd:.1f}%  ', style=f'bold {PINK}')
+    stats.append('Recovery ', style=FAINT)
+    stats.append(f'+{recov:.1f}%  ', style=f'bold {TEAL}')
+    stats.append('▲ ATH ', style=TEAL)
+    stats.append(f'${hi:,.0f}   ', style=FAINT)
+    stats.append('▼ Low ', style=PINK)
+    stats.append(f'${lo:,.0f}   ', style=FAINT)
+    stats.append('╌╌ start capital ', style='#3a3a5a')
+    stats.append(f'${start_val:,.0f}\n', style=FAINT)
 
     body = stats
     for i, line in enumerate(rows):
@@ -994,7 +1045,7 @@ def _build(S: dict, frame: int) -> Layout:
     layout.split_column(
         Layout(name='header',    size=5),
         Layout(name='body'),
-        Layout(name='bal_chart', size=10),  # solid filled-area balance chart
+        Layout(name='bal_chart', size=12),  # advanced wallet tracker (2 stat rows + 6 chart + axis)
         Layout(name='trades',    size=10),  # ATLAS trade card grid + last-20 ribbon
         Layout(name='footer',    size=1),
     )
