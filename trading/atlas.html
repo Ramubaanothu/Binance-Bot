@@ -2,615 +2,483 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ATLAS — AlphaBot Dashboard</title>
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+<title>ATLAS — AlphaBot</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  @keyframes dot-beat { 0%,100% { transform:scale(1); box-shadow:0 0 0 0 rgba(0,255,204,0.6); } 50% { transform:scale(1.25); box-shadow:0 0 0 6px rgba(0,255,204,0); } }
-  @keyframes top-sweep { 0%,100% { background-position:0% 50%; } 50% { background-position:100% 50%; } }
+/* ════════════════════════ ATLAS v6 — clean rebuild ════════════════════════ */
+:root {
+  --bg:#06060f; --panel:#0a0a18; --edge:#16162c;
+  --teal:#00e5c0; --pink:#ff2d78; --violet:#9d6bff; --amber:#f7b733; --cyan:#38bdf8;
+  --txt:#d9d9f2; --dim:#5a5a86; --faint:#2e2e52;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { height:100%; }
+body { background:var(--bg); color:var(--dim); font:12px/1.45 'DM Sans',sans-serif; overflow:hidden; }
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-thumb { background:#1e3d38; border-radius:3px; }
+.mono { font-family:'JetBrains Mono',monospace; }
+.big  { font-family:'Bebas Neue',sans-serif; }
 
-  * { margin:0; padding:0; box-sizing:border-box; }
-  html,body { height:100%; }
-  body { background:#05050d; font-family:'DM Sans',sans-serif; color:#4a4a72; font-size:12px; overflow:hidden; }
-  ::-webkit-scrollbar { width:4px; height:4px; }
-  ::-webkit-scrollbar-track { background:transparent; }
-  ::-webkit-scrollbar-thumb { background:rgba(0,255,204,0.25); border-radius:2px; }
+/* viewport-locked grid — overflow is impossible by construction */
+.app { height:100vh; display:grid; grid-template-rows:44px 44vh minmax(0,1fr) 148px 24px; overflow:hidden; }
 
-  .mono  { font-family:'JetBrains Mono',monospace; }
-  .bebas { font-family:'Bebas Neue',sans-serif; }
-  .lbl   { color:#2a2a4e; font-size:9px; letter-spacing:0.16em; font-weight:600; }
+/* ── top bar ── */
+.top { display:flex; align-items:center; gap:20px; padding:0 18px; background:var(--panel);
+       border-bottom:1px solid var(--edge); white-space:nowrap; font-size:11.5px; }
+.top .logo { color:var(--teal); font-weight:700; letter-spacing:.24em; font-size:14px; }
+.top b { color:var(--txt); font-weight:600; }
+.kv { color:var(--dim); }
+.kv .u { font-size:9px; letter-spacing:.12em; color:var(--faint); margin-right:4px; }
 
-  /* App grid: everything locked to the viewport - nothing can overflow */
-  .app {
-    height:100vh; display:grid; overflow:hidden;
-    grid-template-rows: 3px 42px 50vh minmax(0,1fr) 150px 26px;
-  }
-  .sweep { background:linear-gradient(90deg,transparent,#00ffcc,#7000ff,#ff0080,transparent); background-size:200% 100%; animation:top-sweep 7s ease infinite; }
+/* ── chart band (44% of screen) ── */
+.chartband { position:relative; background:#04040c; border-bottom:1px solid var(--edge); min-height:0; }
+.chartband canvas { position:absolute; inset:0; width:100%; height:100%; }
+.hero { position:absolute; top:14px; left:20px; z-index:3; pointer-events:none;
+        background:rgba(6,6,15,.6); backdrop-filter:blur(4px); padding:10px 16px; border-left:2px solid var(--teal); }
+.hero .amt { font-size:42px; line-height:1; color:var(--txt); }
+.hero .amt .cur { color:var(--teal); }
+.hero .sub { display:flex; gap:16px; margin-top:6px; font-size:11.5px; }
+.intel { position:absolute; top:14px; right:20px; z-index:3; display:flex; gap:16px; font-size:10.5px;
+         background:rgba(6,6,15,.6); backdrop-filter:blur(4px); padding:7px 14px; border-right:2px solid var(--violet); }
+.intel b { font-weight:700; }
+.cfoot { position:absolute; left:20px; bottom:8px; z-index:3; display:flex; gap:20px; font-size:10.5px; }
 
-  .statusbar { display:flex; align-items:center; gap:16px; padding:0 16px; background:#070714; border-bottom:1px solid rgba(0,255,204,0.08); font-size:11px; white-space:nowrap; overflow:hidden; }
-  .beat { width:8px; height:8px; border-radius:50%; background:#00ffcc; animation:dot-beat 2s ease-in-out infinite; }
-  .beat.dead { background:#ff0080; animation:none; }
-  .sb-item b { color:#c8c8f0; font-weight:600; }
+/* ── middle band: positions | feed | rail ── */
+.mid { display:grid; grid-template-columns:33% 45% 22%; min-height:0; }
+.col { display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--edge); }
+.col:last-child { border-right:none; }
+.chead { display:flex; align-items:center; gap:10px; height:30px; padding:0 14px;
+         border-bottom:1px solid var(--edge); flex-shrink:0; font-size:10px; letter-spacing:.16em; font-weight:700; }
+.cbody { flex:1; overflow-y:auto; min-height:0; padding:8px 10px; }
 
-  /* CHART = exactly 50vh, hero + intel as overlays */
-  .chartrow { position:relative; border-bottom:1px solid rgba(0,255,204,0.08); background:#03030c; min-height:0; }
-  .chartrow canvas { position:absolute; inset:0; width:100%; height:100%; }
-  .hero {
-    position:absolute; top:14px; left:18px; z-index:5; pointer-events:none;
-    background:rgba(5,5,16,0.55); backdrop-filter:blur(3px); padding:10px 16px 12px; border-left:2px solid #00ffcc;
-  }
-  .intel { position:absolute; top:14px; right:18px; z-index:5; display:flex; gap:14px; font-size:10px;
-    background:rgba(5,5,16,0.55); backdrop-filter:blur(3px); padding:8px 14px; border-right:2px solid #7000ff; }
-  .chartfoot { position:absolute; left:18px; bottom:10px; z-index:5; display:flex; gap:18px; font-size:10px; }
+/* positions */
+.pcard { border:1px solid var(--edge); border-left:3px solid var(--teal); background:var(--panel);
+         padding:8px 12px; margin-bottom:8px; }
+.pcard .row1 { display:flex; justify-content:space-between; align-items:baseline; }
+.pcard .sym  { color:var(--txt); font-weight:700; font-size:13px; }
+.pcard .pct  { font-size:22px; font-weight:700; }
+.pcard .row2 { display:flex; gap:10px; margin-top:2px; font-size:10px; align-items:center; }
+.pcard .row3 { display:flex; justify-content:space-between; margin-top:6px; font-size:10px; color:var(--faint); }
+.pcard .row3 b { color:var(--dim); font-weight:500; }
+.tag { font-size:8.5px; padding:1px 6px; letter-spacing:.1em; background:rgba(157,107,255,.14); color:var(--violet); }
 
-  /* MIDDLE: positions | gauges | signal feed */
-  .mid { display:grid; grid-template-columns: 30% 19% 1fr; min-height:0; border-bottom:1px solid rgba(255,0,128,0.08); }
-  .col { display:flex; flex-direction:column; min-height:0; border-right:1px solid rgba(0,255,204,0.06); }
-  .colhead { display:flex; align-items:center; gap:8px; padding:7px 14px; border-bottom:1px solid rgba(0,255,204,0.06); flex-shrink:0; }
-  .colbody { flex:1; overflow-y:auto; min-height:0; padding:8px 12px; }
+/* signal feed — dense rows */
+.frow { display:flex; align-items:center; gap:8px; padding:4px 6px; border-bottom:1px solid #0d0d1e; font-size:11px; }
+.frow:hover { background:rgba(255,255,255,.02); }
+.frow .t   { color:var(--faint); font-size:9.5px; width:52px; flex-shrink:0; }
+.frow .chip{ width:56px; flex-shrink:0; text-align:center; font-size:8.5px; font-weight:700; letter-spacing:.08em; padding:1px 0; }
+.frow .s   { color:var(--txt); font-weight:600; width:110px; flex-shrink:0; }
+.frow .d   { width:14px; flex-shrink:0; font-weight:700; }
+.frow .cf  { width:38px; flex-shrink:0; text-align:right; font-weight:700; }
+.frow .bar { width:52px; height:3px; background:#14142a; flex-shrink:0; }
+.frow .bar i { display:block; height:100%; }
+.frow .m   { color:var(--faint); font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-  .poscard { border:1px solid rgba(0,255,204,0.1); padding:10px 12px; margin-bottom:8px; background:rgba(0,255,204,0.015); }
-  .poscard:hover { background:rgba(0,255,204,0.04); }
+/* right rail */
+.rail .sec { padding:10px 14px; border-bottom:1px solid var(--edge); }
+.gline { display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:10px; }
+.gline .n { width:64px; letter-spacing:.08em; color:var(--faint); }
+.gline .g { flex:1; height:4px; background:#14142a; }
+.gline .g i { display:block; height:100%; }
+.gline .v { width:42px; text-align:right; font-weight:700; }
+.aline { display:flex; justify-content:space-between; font-size:11px; margin-bottom:6px; }
+.aline .k { color:var(--faint); }
+.aline b { font-weight:600; }
 
-  /* signal feed = wrapping card grid, scrolls vertically */
-  #sig-cards { display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; }
-  .sigcard { width:206px; height:72px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; position:relative; overflow:hidden; background:rgba(255,255,255,0.015); }
+/* trades strip */
+.trades { display:flex; flex-direction:column; min-height:0; border-top:1px solid var(--edge); }
+.tstrip { flex:1; display:flex; overflow-x:auto; overflow-y:hidden; min-height:0; }
+.tcell { min-width:158px; flex:1 0 158px; padding:8px 12px; border-right:1px solid #14142a; }
+.tcell .top1 { display:flex; justify-content:space-between; font-size:9.5px; color:var(--faint); }
+.tcell .sym { color:var(--txt); font-weight:700; font-size:12px; margin-top:1px; }
+.tcell .pct { font-size:20px; font-weight:700; line-height:1.15; }
+.tcell .why { font-size:9px; letter-spacing:.06em; }
+.tcell .usd { font-size:10px; color:var(--dim); margin-top:1px; }
 
-  /* TRADES: horizontal scroll strip pinned inside its grid row */
-  .traderow { display:flex; flex-direction:column; min-height:0; }
-  #trade-grid { flex:1; display:grid; grid-auto-flow:column; grid-auto-columns:minmax(152px,1fr); overflow-x:auto; overflow-y:hidden; min-height:0; }
-  .tradecell { padding:8px 12px; border-right:1px solid rgba(255,0,128,0.08); overflow:hidden; }
-  .tradecell:hover { background:rgba(255,0,128,0.05); }
-
-  .footer { display:flex; align-items:center; gap:18px; padding:0 16px; font-size:10px; border-top:1px solid rgba(0,255,204,0.07); background:#070714; white-space:nowrap; overflow:hidden; }
+/* footer */
+.foot { display:flex; align-items:center; gap:16px; padding:0 16px; background:var(--panel);
+        border-top:1px solid var(--edge); font-size:10px; white-space:nowrap; }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--teal); }
+.dot.dead { background:var(--pink); }
+.up { color:var(--teal); } .dn { color:var(--pink); }
 </style>
 </head>
 <body>
 <div class="app">
-  <div class="sweep"></div>
 
-  <!-- STATUS BAR -->
-  <div class="statusbar">
-    <span style="display:flex; align-items:center; gap:8px"><span class="beat" id="conn-dot"></span>
-      <span style="color:#00ffcc; font-weight:700; font-size:13px; letter-spacing:0.22em">ATLAS</span>
-      <span style="color:#2a2a4e; font-size:9px" id="mode-badge">v5.0</span></span>
-    <span class="sb-item">BAL <b class="bebas" style="font-size:15px; color:#e8e8ff" id="sb-bal">$--</b></span>
-    <span class="sb-item">DAY <b id="sb-day">--</b></span>
-    <span class="sb-item">TOTAL <b id="sb-total">--</b></span>
-    <span class="sb-item">ALL-TIME <b id="sb-sess">--</b></span>
-    <span class="sb-item">BTC <b style="color:#f7c948" id="sb-btc">--</b></span>
-    <span class="sb-item">WR <b style="color:#f59e0b" id="sb-wr">--</b></span>
-    <span class="sb-item" id="sb-wl">0W / 0L</span>
-    <span class="sb-item">POS <b style="color:#00ffcc" id="sb-pos">0</b></span>
-    <span class="sb-item">SCAN <b style="color:#a06bff" id="sb-scan">#0</b></span>
-    <span style="margin-left:auto; display:flex; align-items:center; gap:12px">
-      <span style="color:#06b6d4" id="sb-session">-- SESSION</span>
-      <span class="bebas" style="color:#00ffcc; font-size:14px; letter-spacing:0.18em" id="sb-time">--:--:--</span></span>
+  <div class="top">
+    <span class="logo">● ATLAS</span>
+    <span class="kv"><span class="u">BAL</span><b class="big" style="font-size:17px" id="bal">$—</b></span>
+    <span class="kv"><span class="u">DAY</span><b id="day">—</b></span>
+    <span class="kv"><span class="u">TOTAL</span><b id="total">—</b></span>
+    <span class="kv"><span class="u">ALL-TIME</span><b id="alltime">—</b></span>
+    <span class="kv"><span class="u">BTC</span><b style="color:var(--amber)" id="btc">—</b></span>
+    <span class="kv"><span class="u">WR</span><b style="color:var(--amber)" id="wr">—</b></span>
+    <span class="kv" id="wl">0W/0L</span>
+    <span class="kv"><span class="u">POS</span><b style="color:var(--teal)" id="pos">0/5</b></span>
+    <span class="kv"><span class="u">SCAN</span><b style="color:var(--violet)" id="scan">#0</b></span>
+    <span class="kv" id="pausebadge" style="color:var(--pink); font-weight:700"></span>
+    <span style="margin-left:auto; display:flex; gap:14px; align-items:center">
+      <span style="color:var(--cyan)" id="session">—</span>
+      <span class="big" style="color:var(--teal); font-size:15px; letter-spacing:.16em" id="clock">--:--:--</span>
+    </span>
   </div>
 
-  <!-- CHART - 50% of the screen -->
-  <div class="chartrow">
-    <canvas id="chart"></canvas>
+  <div class="chartband">
+    <canvas id="cv"></canvas>
     <div class="hero">
-      <div class="lbl">ACCOUNT BALANCE &middot; BINANCE DAY-1</div>
-      <div class="bebas" style="font-size:46px; line-height:1.05; color:#e8e8ff"><span style="color:#00ffcc">$</span><span id="hero-int">--</span><span style="color:#3a3a6e; font-size:32px" id="hero-dec">.00</span></div>
-      <div style="display:flex; gap:16px; margin-top:6px; font-size:12px">
-        <span><b style="font-weight:700" id="hero-day">--</b> <span class="lbl" style="font-size:8px">DAY</span></span>
-        <span><b style="font-weight:700" id="hero-total">--</b> <span class="lbl" style="font-size:8px">TOTAL</span></span>
-        <span><b style="font-weight:700" id="hero-sess">--</b> <span class="lbl" style="font-size:8px">ALL-TIME</span></span>
+      <div style="font-size:9px; letter-spacing:.18em; color:var(--faint)">ACCOUNT BALANCE · BINANCE DAY-1</div>
+      <div class="big amt"><span class="cur">$</span><span id="h-bal">—</span></div>
+      <div class="sub">
+        <span><b id="h-day">—</b> <span style="font-size:8.5px; color:var(--faint)">DAY</span></span>
+        <span><b id="h-total">—</b> <span style="font-size:8.5px; color:var(--faint)">TOTAL</span></span>
+        <span><b id="h-at">—</b> <span style="font-size:8.5px; color:var(--faint)">ALL-TIME</span></span>
+        <span><b id="h-dd" class="dn">—</b> <span style="font-size:8.5px; color:var(--faint)">MAX DD</span></span>
       </div>
     </div>
     <div class="intel">
-      <span>1H <b id="mi-1h" style="font-weight:700">--</b></span>
-      <span>4H <b id="mi-4h" style="font-weight:700">--</b></span>
-      <span>1D <b id="mi-1d" style="font-weight:700">--</b></span>
-      <span>BTC 10m <b id="mi-btc" style="font-weight:700">--</b></span>
-      <span>F&amp;G <b id="mi-fng" style="color:#f59e0b; font-weight:700">--</b></span>
+      <span>1H <b id="t1h">—</b></span><span>4H <b id="t4h">—</b></span><span>1D <b id="t1d">—</b></span>
+      <span>RSI <b id="brsi">—</b></span><span>F&amp;G <b style="color:var(--amber)" id="fng">—</b></span>
     </div>
-    <div class="chartfoot mono">
-      <span>Hi <span style="color:#00ffcc" id="chart-hi">--</span></span>
-      <span>Lo <span style="color:#ff0080" id="chart-lo">--</span></span>
-      <span id="chart-sess" style="color:#4a4a72">--</span>
+    <div class="cfoot mono">
+      <span>▲ ATH <span class="up" id="ath">—</span></span>
+      <span>▼ Low <span class="dn" id="low">—</span></span>
+      <span style="color:var(--faint)">╌╌ start <span id="startcap">—</span></span>
+      <span style="color:var(--faint)" id="curveinfo"></span>
     </div>
   </div>
 
-  <!-- MIDDLE -->
   <div class="mid">
     <div class="col">
-      <div class="colhead">
-        <span style="color:#00ffcc; font-size:10px; font-weight:700; letter-spacing:0.18em">POSITIONS</span>
-        <span style="color:#00ffcc; font-size:10px; background:rgba(0,255,204,0.08); padding:1px 7px" id="pos-count">0/5</span>
-        <span style="color:#00ffcc; font-size:10px" id="pos-long">0L</span>
-        <span style="color:#ff0080; font-size:10px" id="pos-short">0S</span>
-        <span style="margin-left:auto; font-size:10px; font-weight:700" id="pos-pnl">+0.00$</span>
+      <div class="chead" style="color:var(--teal)">POSITIONS
+        <span id="pcount" style="background:rgba(0,229,192,.1); padding:1px 7px">0/5</span>
+        <span id="plong" class="up">0L</span><span id="pshort" class="dn">0S</span>
+        <span style="margin-left:auto" id="ppnl">+0.00$</span>
       </div>
-      <div class="colbody" id="pos-list"></div>
+      <div class="cbody" id="plist"></div>
     </div>
+
     <div class="col">
-      <div class="colhead"><span class="lbl">GAUGES</span></div>
-      <div style="padding:12px 16px; flex-shrink:0" id="gauges"></div>
-      <div class="colhead" style="border-top:1px solid rgba(0,255,204,0.06)"><span class="lbl">FEED STATS</span></div>
-      <div style="padding:10px 16px; display:flex; flex-direction:column; gap:8px; font-size:11px">
-        <span>SIGNALS <b style="color:#00ffcc; float:right" id="cnt-sig">0</b></span>
-        <span>FILTERS <b style="color:#f59e0b; float:right" id="cnt-fil">0</b></span>
-        <span>ALERTS <b style="color:#ff0080; float:right" id="cnt-alr">0</b></span>
-        <span class="mono" style="color:#2a2a4e; font-size:9px" id="feed-scan">--</span>
+      <div class="chead" style="color:var(--violet)">● SIGNAL FEED
+        <span class="mono" style="font-weight:400; letter-spacing:0; color:var(--faint)" id="scanline">—</span>
+        <span style="margin-left:auto; font-weight:400; color:var(--faint)" id="fcounts">—</span>
       </div>
+      <div class="cbody" id="feed" style="padding:4px 8px"></div>
     </div>
-    <div class="col" style="border-right:none">
-      <div class="colhead">
-        <span style="color:#a06bff; font-size:10px; font-weight:700; letter-spacing:0.18em">&#9679; SIGNAL FEED</span>
-        <span class="lbl" style="margin-left:auto">newest first &middot; scrolls</span>
+
+    <div class="col rail">
+      <div class="sec">
+        <div style="font-size:9px; letter-spacing:.16em; color:var(--faint); margin-bottom:10px">GAUGES</div>
+        <div class="gline"><span class="n">WIN RATE</span><span class="g"><i id="g-wr" style="background:var(--teal)"></i></span><span class="v up" id="gv-wr">—</span></div>
+        <div class="gline"><span class="n">F&amp;G</span><span class="g"><i id="g-fng" style="background:var(--amber)"></i></span><span class="v" style="color:var(--amber)" id="gv-fng">—</span></div>
+        <div class="gline"><span class="n">DRAWDOWN</span><span class="g"><i id="g-dd" style="background:var(--pink)"></i></span><span class="v dn" id="gv-dd">—</span></div>
+        <div class="gline"><span class="n">BTC RSI</span><span class="g"><i id="g-rsi" style="background:var(--violet)"></i></span><span class="v" style="color:var(--violet)" id="gv-rsi">—</span></div>
       </div>
-      <div class="colbody" id="sig-cards"></div>
+      <div class="sec" style="flex:1">
+        <div style="font-size:9px; letter-spacing:.16em; color:var(--faint); margin-bottom:10px">TRADE ANALYTICS</div>
+        <div class="aline"><span class="k">Risk/trade</span><b id="a-risk">—</b></div>
+        <div class="aline"><span class="k">Profit factor</span><b id="a-pf">—</b></div>
+        <div class="aline"><span class="k">Expectancy</span><b id="a-exp">—</b></div>
+        <div class="aline"><span class="k">Avg win</span><b class="up" id="a-aw">—</b></div>
+        <div class="aline"><span class="k">Avg loss</span><b class="dn" id="a-al">—</b></div>
+        <div class="aline"><span class="k">Best / Worst</span><b id="a-bw">—</b></div>
+        <div class="aline"><span class="k">Session</span><b id="a-sess">—</b></div>
+      </div>
     </div>
   </div>
 
-  <!-- TRADES strip -->
-  <div class="traderow">
-    <div class="colhead" style="border-bottom:1px solid rgba(255,0,128,0.08)">
-      <span style="color:#ff0080; font-size:10px; font-weight:700; letter-spacing:0.18em">TRADES</span>
-      <span style="font-size:10px" id="tr-wl">0W / 0L</span>
-      <span style="color:#f59e0b; font-size:10px" id="tr-wr">WR --</span>
-      <span style="font-size:10px; font-weight:700" id="tr-total">Total --</span>
-      <span style="font-size:10px" id="tr-pf">PF --</span>
-      <span style="font-size:10px" id="tr-avg">--</span>
-      <span class="lbl" style="margin-left:auto">last 24 &middot; scroll &rarr;</span>
+  <div class="trades">
+    <div class="chead" style="color:var(--pink)">TRADES
+      <span id="twl" style="font-weight:400">0W/0L</span>
+      <span style="color:var(--amber)" id="twr">WR —</span>
+      <span id="ttot">Total —</span>
+      <span id="tpf" style="font-weight:400">PF —</span>
+      <span style="margin-left:auto; font-weight:400; color:var(--faint)">last 30 · scroll →</span>
     </div>
-    <div id="trade-grid"></div>
+    <div class="tstrip" id="tstrip"></div>
   </div>
 
-  <!-- FOOTER -->
-  <div class="footer">
-    <span style="display:flex; align-items:center; gap:6px"><span class="beat" id="ft-dot" style="width:6px; height:6px"></span><span id="ft-status">connecting...</span></span>
-    <span id="ft-pause"></span>
-    <span style="margin-left:auto" id="ft-exch">BINANCE &middot; TESTNET</span>
+  <div class="foot">
+    <span style="display:flex; align-items:center; gap:7px"><span class="dot" id="cdot"></span><span id="cstat">connecting…</span></span>
+    <span style="margin-left:auto" class="mono">BINANCE · TESTNET · ws://localhost:8765</span>
   </div>
 </div>
 
 <script>
 'use strict';
-const TEAL='#00ffcc', PINK='#ff0080', VIOLET='#7000ff', AMBER='#f59e0b', CYAN='#06b6d4';
 const $ = id => document.getElementById(id);
-const pnlCol = v => v >= 0 ? TEAL : PINK;
-const fsign  = (v,d=2) => (v>=0?'+':'')+Number(v).toFixed(d);
-const fprice = v => v < 10 ? Number(v).toPrecision(5) : Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const TEAL = '#00e5c0', PINK = '#ff2d78';
+let S = {}, curve = [], startCap = 0, mouse = {x:-1};
 
-let S = null;                    // latest bot state
-let balHist = [];                // [{t, v}] balance history (persisted)
-let posHist = {};                // symbol -> [pnl_pct...] sparkline history
-let startBal = 0;
-
-// ── Load persisted balance history ────────────────────────────────────────────
-try {
-  const saved = JSON.parse(localStorage.getItem('atlas_balhist') || '[]');
-  const cutoff = Date.now() - 24*3600*1000;
-  balHist = saved.filter(p => p.t > cutoff);
-} catch(e) {}
-
-// ── Clock (IST = UTC+5:30) ────────────────────────────────────────────────────
-setInterval(() => {
-  const d = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000);
-  const p = n => String(n).padStart(2,'0');
-  $('sb-time').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} IST`;
-}, 1000);
-
-// ── WebSocket ─────────────────────────────────────────────────────────────────
-let ws = null;
-// Only rewrite a panel when its content actually changed — kills the blinking
-// caused by rebuilding every DOM node on every push, and preserves scroll.
-function setHTML(id, html) {
+/* ── helpers: in-place updates only — no innerHTML churn, no blinking ── */
+function put(id, txt, col) {
   const el = $(id);
-  if (!el || el.__h === html) return;
-  const st = el.scrollTop;
-  el.__h = html; el.innerHTML = html;
-  el.scrollTop = st;
+  if (el.textContent !== txt) el.textContent = txt;
+  if (col && el.style.color !== col) el.style.color = col;
 }
-let _lastRender = 0;
+const fmt$ = v => '$' + (+v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const sgn  = (v, d=2) => (v >= 0 ? '+' : '') + (+v).toFixed(d);
+const pcol = v => v > 0 ? TEAL : (v < 0 ? PINK : '#5a5a86');
 
+/* ── websocket ── */
+let ws, lastRender = 0;
 function connect() {
   ws = new WebSocket('ws://localhost:8765');
-  ws.onopen = () => {
-    $('conn-dot').classList.remove('dead');
-    $('ft-dot').classList.remove('dead');
-    $('ft-status').innerHTML = '<span style="color:#00ffcc">● CONNECTED</span>';
-  };
+  ws.onopen  = () => { $('cdot').classList.remove('dead'); put('cstat', 'CONNECTED'); };
+  ws.onclose = () => { $('cdot').classList.add('dead'); put('cstat', 'DISCONNECTED — retrying…'); setTimeout(connect, 3000); };
+  ws.onerror = () => ws.close();
   ws.onmessage = ev => {
     try {
       const d = JSON.parse(ev.data);
-      if (d.type === 'state') {
-        S = d;
-        const now = Date.now();
-        if (now - _lastRender > 900) { _lastRender = now; onState(); }
-      }
-    } catch(e) {}
+      if (d.type !== 'state') return;
+      S = d;
+      const now = Date.now();
+      if (now - lastRender > 900) { lastRender = now; render(); }
+    } catch (e) {}
   };
-  ws.onclose = () => {
-    $('conn-dot').classList.add('dead');
-    $('ft-dot').classList.add('dead');
-    $('ft-status').innerHTML = '<span style="color:#ff0080">● DISCONNECTED — retrying…</span>';
-    setTimeout(connect, 3000);
-  };
-  ws.onerror = () => ws.close();
 }
 connect();
+setInterval(() => {  // IST clock
+  const d = new Date(Date.now() + (330 + new Date().getTimezoneOffset()) * 60000);
+  const p = n => String(n).padStart(2, '0');
+  put('clock', `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())} IST`);
+}, 1000);
 
-// ── State handler ─────────────────────────────────────────────────────────────
-function onState() {
+/* ── master render ── */
+function render() {
   const bal = S.balance || 0;
-  startBal = S.start_bal || startBal || bal;
 
-  // Prefer the TRUE day-1 wallet curve reconstructed from Binance income
+  // wallet curve (true Binance day-1) + live point
   if (S.wallet_curve && S.wallet_curve.length > 2) {
-    balHist = S.wallet_curve.map(p => ({ t: p[0]*1000, v: p[1] }));
-    balHist.push({ t: Date.now(), v: bal });
-    if (S.wallet_start) startBal = S.wallet_start;
+    curve = S.wallet_curve.map(p => ({t:p[0]*1000, v:p[1]}));
+    curve.push({t:Date.now(), v:bal});
+    startCap = S.wallet_start || curve[0].v;
+  } else if (bal > 0) {
+    if (!curve.length || Math.abs(bal - curve[curve.length-1].v) > 0.005) curve.push({t:Date.now(), v:bal});
+    if (!startCap) startCap = bal - (S.total_pnl || 0);
   }
-  // balance history: append when changed or every 10s
-  const last = balHist[balHist.length-1];
-  if (!(S.wallet_curve && S.wallet_curve.length > 2) &&
-      (!last || Math.abs(bal - last.v) > 0.005 || Date.now() - last.t > 10000)) {
-    balHist.push({ t: Date.now(), v: bal });
-    if (balHist.length > 1500) balHist = balHist.slice(-1500);
-    try { localStorage.setItem('atlas_balhist', JSON.stringify(balHist)); } catch(e) {}
+  const at = startCap ? (bal/startCap - 1) * 100 : 0;
+
+  // top bar + hero
+  put('bal', fmt$(bal)); put('h-bal', (+bal).toLocaleString('en-US', {minimumFractionDigits:2}));
+  put('day', sgn(S.daily_pnl||0), pcol(S.daily_pnl||0)); put('h-day', sgn(S.daily_pnl||0), pcol(S.daily_pnl||0));
+  put('total', sgn(S.total_pnl||0), pcol(S.total_pnl||0)); put('h-total', sgn(S.total_pnl||0), pcol(S.total_pnl||0));
+  put('alltime', sgn(at)+'%', pcol(at)); put('h-at', sgn(at)+'%', pcol(at));
+  put('btc', S.btc_price ? '$'+(+S.btc_price).toLocaleString('en-US',{maximumFractionDigits:0}) : '—');
+  put('wr', (S.win_rate||0)+'%'); put('wl', `${S.wins||0}W/${S.losses||0}L`);
+  put('pos', `${(S.positions||[]).length}/5`); put('scan', '#'+(S.scan_count||0));
+  put('session', (S.session||'—').toUpperCase()+' SESSION');
+  put('pausebadge', S.paused ? '⏸ '+(S.pause_reason||'PAUSED') : '');
+
+  // curve stats
+  if (curve.length > 2) {
+    const vs = curve.map(p => p.v);
+    let pk = vs[0], dd = 0;
+    vs.forEach(v => { pk = Math.max(pk, v); if (pk) dd = Math.max(dd, (pk-v)/pk*100); });
+    put('h-dd', '-'+dd.toFixed(1)+'%');
+    put('ath', fmt$(Math.max(...vs))); put('low', fmt$(Math.min(...vs)));
+    put('startcap', fmt$(startCap));
+    const days = (curve[curve.length-1].t - curve[0].t) / 864e5;
+    put('curveinfo', `${curve.length}pts · ${days.toFixed(1)}d`);
   }
 
-  renderStatus(); renderHero(); renderPositions(); renderGauges();
-  renderMarket(); renderSignals(); renderTrades(); renderFooter();
-  drawChart();
+  // intel chips
+  const tcol = t => t==='bull' ? TEAL : (t==='bear' ? PINK : '#5a5a86');
+  put('t1h', (S.btc_trend||'—').toUpperCase(), tcol(S.btc_trend));
+  put('t4h', (S.btc_4h_trend||'—').toUpperCase(), tcol(S.btc_4h_trend));
+  put('t1d', S.btc_daily_bull ? 'BULL' : 'BEAR', S.btc_daily_bull ? TEAL : PINK);
+  put('brsi', String(Math.round(S.btc_rsi||0)));
+  put('fng', String(S.fear_greed ?? '—'));
+
+  renderPositions(); renderFeed(); renderRail(); renderTrades();
+  draw();
 }
 
-function renderStatus() {
-  const sessPct = startBal ? ((S.balance/startBal)-1)*100 : 0;
-  $('sb-bal').textContent = '$' + S.balance.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const day = $('sb-day'); day.textContent = fsign(S.daily_pnl); day.style.color = pnlCol(S.daily_pnl);
-  const tot = $('sb-total'); tot.textContent = fsign(S.total_pnl); tot.style.color = pnlCol(S.total_pnl);
-  const se = $('sb-sess'); se.textContent = fsign(sessPct,3)+'%'; se.style.color = pnlCol(sessPct);
-  $('sb-wr').textContent = (S.win_rate||0) + '%';
-  $('sb-wl').textContent = `${S.wins||0}W / ${S.losses||0}L`;
-  $('sb-pos').textContent = (S.positions||[]).length;
-  $('sb-scan').textContent = '#' + (S.scan_count||0);
-  $('sb-session').textContent = (S.session||'—').toUpperCase() + ' SESSION';
-  $('mode-badge').textContent = S.paper_mode ? 'PAPER' : 'v5.0';
-  $('mode-badge').style.color = S.paper_mode ? AMBER : '#1a1a3a';
-}
-
-function renderHero() {
-  const [i, d] = S.balance.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}).split('.');
-  $('hero-int').textContent = i; $('hero-dec').textContent = '.' + d;
-  const sessPct = startBal ? ((S.balance/startBal)-1)*100 : 0;
-  const hd = $('hero-day'); hd.textContent = fsign(S.daily_pnl); hd.style.color = pnlCol(S.daily_pnl);
-  const ht = $('hero-total'); ht.textContent = fsign(S.total_pnl); ht.style.color = pnlCol(S.total_pnl);
-  const hs = $('hero-sess'); hs.textContent = fsign(sessPct,3)+'%'; hs.style.color = pnlCol(sessPct);
-}
-
-function sparkPath(hist) {
-  if (!hist || hist.length < 2) return 'M0,6 L100,6';
-  const min = Math.min(...hist), max = Math.max(...hist), range = (max-min)||1;
-  return 'M ' + hist.map((v,i)=>`${(i/(hist.length-1))*100} ${12-((v-min)/range)*9.6-1.2}`).join(' L ');
-}
-
+/* ── positions: rebuild only when the SET changes; else field updates ── */
 function renderPositions() {
   const ps = S.positions || [];
-  const longs = ps.filter(p=>p.direction==='long').length;
-  $('pos-count').textContent = `${ps.length}/5`;
-  $('pos-long').textContent  = longs + 'L';
-  $('pos-short').textContent = (ps.length-longs) + 'S';
-  const tot = ps.reduce((a,p)=>a+(p.pnl_usd||0),0);
-  const pp = $('pos-pnl'); pp.textContent = fsign(tot)+'$'; pp.style.color = pnlCol(tot);
+  const longs = ps.filter(p => p.direction === 'long').length;
+  put('pcount', `${ps.length}/5`); put('plong', longs+'L'); put('pshort', (ps.length-longs)+'S');
+  const tot = ps.reduce((a,p) => a+(p.pnl_usd||0), 0);
+  put('ppnl', sgn(tot)+'$', pcol(tot));
 
-  // sparkline history
-  const seen = new Set();
-  ps.forEach(p => {
-    seen.add(p.symbol);
-    (posHist[p.symbol] = posHist[p.symbol] || []).push(p.pnl_pct||0);
-    if (posHist[p.symbol].length > 28) posHist[p.symbol] = posHist[p.symbol].slice(-28);
-  });
-  Object.keys(posHist).forEach(s => { if (!seen.has(s)) delete posHist[s]; });
-
-  if (!ps.length) {
-    setHTML('pos-list', '<div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions — scanning…</div>');
-    $('pos-list').__key = '';
-    return;
+  const el = $('plist');
+  const key = ps.map(p => p.symbol+p.direction+(p.phase||'')).join('|');
+  if (el.dataset.key !== key) {
+    el.dataset.key = key;
+    el.innerHTML = ps.length ? ps.map(p => `
+      <div class="pcard" data-s="${p.symbol}">
+        <div class="row1"><span class="sym">${p.symbol}</span><span class="pct js-pct">—</span></div>
+        <div class="row2">
+          <span style="color:${p.direction==='long'?TEAL:PINK}; font-weight:700">${p.direction==='long'?'▲ LONG':'▼ SHORT'}</span>
+          <span>${p.leverage||10}x</span>
+          <span class="tag">${(p.phase||'open').toUpperCase()}</span>
+          <span style="margin-left:auto" class="js-usd">—</span>
+        </div>
+        <div class="row3">
+          <span>E <b>${p.entry}</b></span><span>SL <b>${p.sl}</b></span>
+          <span>TP1 <b>${p.tp1}</b></span><span>→ <b class="js-now">—</b></span>
+        </div>
+      </div>`).join('')
+      : '<div style="text-align:center; padding:24px 0; color:var(--faint)">No open positions — scanning…</div>';
   }
-  // Structure key: rebuild DOM only when the SET of positions changes;
-  // otherwise update fields IN PLACE — no innerHTML swap, no blinking.
-  const el  = $('pos-list');
-  const key = ps.map(p => p.symbol + p.direction + (p.phase||'')).join('|');
-  if (el.__key !== key) {
-    el.__key = key; el.__h = null;
-    el.innerHTML = ps.map(p => {
-      const c = pnlCol(p.pnl_pct||0), dc = p.direction==='long'?TEAL:PINK;
-      return `<div class="poscard" data-sym="${p.symbol}" style="border-top:2px solid ${c}">
-      <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:8px">
-        <div>
-          <div style="color:#c0c0e8; font-size:13px; font-weight:700; letter-spacing:0.02em">${p.symbol}</div>
-          <div style="display:flex; align-items:center; gap:6px; margin-top:3px">
-            <span style="color:${dc}; font-size:10px; font-weight:700">${p.direction==='long'?'▲ L':'▼ S'}</span>
-            <span style="color:#1a1a3a; font-size:9px">${p.leverage||10}x</span>
-            <span style="color:#7000ff; font-size:8px; background:rgba(112,0,255,0.1); padding:1px 5px">${(p.phase||'open').toUpperCase()}</span>
-            <span style="color:#2a2a4a; font-size:8px">conf ${Math.round(p.conf||0)}%</span>
-          </div>
-        </div>
-        <div style="text-align:right">
-          <div class="bebas pc-pct" style="font-size:32px; line-height:1; letter-spacing:0.02em"></div>
-          <div class="pc-usd" style="font-size:12px; font-weight:600; margin-top:1px"></div>
-        </div>
-      </div>
-      <svg viewBox="0 0 100 12" style="width:100%; height:12px; display:block; overflow:visible; margin-bottom:6px" preserveAspectRatio="none">
-        <path class="pc-spark" d="" fill="none" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"></path>
-      </svg>
-      <div class="mono" style="display:flex; justify-content:space-between; font-size:9px; color:#1a1a3a">
-        <span>Entry ${fprice(p.entry)}</span><span>SL ${fprice(p.sl)}</span><span>TP1 ${fprice(p.tp1)}</span><span>→</span>
-        <span class="pc-now" style="color:#4a4a7a"></span>
-      </div>
-    </div>`;
-    }).join('');
-  }
-  // in-place field updates (every push, zero flicker)
   ps.forEach(p => {
-    const card = el.querySelector(`[data-sym="${p.symbol}"]`);
-    if (!card) return;
-    const c = pnlCol(p.pnl_pct||0);
-    card.style.borderTopColor = c;
-    const pct = card.querySelector('.pc-pct');
-    pct.textContent = fsign(p.pnl_pct||0)+'%'; pct.style.color = c;
-    const usd = card.querySelector('.pc-usd');
-    usd.textContent = fsign(p.pnl_usd||0)+'$'; usd.style.color = pnlCol(p.pnl_usd||0);
-    const sp = card.querySelector('.pc-spark');
-    sp.setAttribute('d', sparkPath(posHist[p.symbol])); sp.setAttribute('stroke', c);
-    card.querySelector('.pc-now').textContent = fprice(p.current);
+    const c = el.querySelector(`[data-s="${p.symbol}"]`); if (!c) return;
+    const col = pcol(p.pnl_pct||0);
+    c.style.borderLeftColor = col;
+    const e1 = c.querySelector('.js-pct'); e1.textContent = sgn(p.pnl_pct||0)+'%'; e1.style.color = col;
+    const e2 = c.querySelector('.js-usd'); e2.textContent = sgn(p.pnl_usd||0)+'$'; e2.style.color = col;
+    c.querySelector('.js-now').textContent = p.current;
   });
 }
 
-function renderGauges() {
-  const dd = S.max_dd || 0;
-  const bars = [
-    { label:'WIN RATE', val:(S.win_rate||0)+'%', w:Math.min(100,S.win_rate||0), color:TEAL },
-    { label:'F&G',      val:S.fear_greed??'—',   w:S.fear_greed||0,            color:AMBER },
-    { label:'DRAWDOWN', val:dd.toFixed(1)+'%',   w:Math.min(100,dd*3),          color:PINK },
-    { label:'BTC RSI',  val:Math.round(S.btc_rsi||50), w:S.btc_rsi||50,         color:VIOLET },
-  ];
-  setHTML('gauges', bars.map(g => `
-    <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
-      <span style="color:#2a2a4a; font-size:8px; width:62px; flex-shrink:0; letter-spacing:0.05em">${g.label}</span>
-      <div style="flex:1; height:3px; background:rgba(255,255,255,0.04)">
-        <div style="height:100%; background:${g.color}; transition:width 1s ease; box-shadow:0 0 5px ${g.color}; width:${g.w}%"></div>
-      </div>
-      <span class="mono" style="color:${g.color}; font-size:9px; font-weight:600; width:30px; text-align:right; flex-shrink:0">${g.val}</span>
-    </div>`).join(''));
-}
+/* ── signal feed: dense rows, newest first, only real events ── */
+const CHIP = { pass:['SIGNAL','#0d3d33',TEAL], exec:['EXEC','#0d3d33',TEAL], exit:['EXIT','#42112b',PINK],
+               warn:['ALERT','#42112b',PINK], error:['ERROR','#42112b',PINK] };
+function renderFeed() {
+  const logs = (S.log||[]).filter(l => CHIP[l.type] &&
+    !/HTTPSConnection|Max retries|timed out|timeout|RemoteDisconnected/i.test(l.msg||''));
+  put('fcounts', `${logs.filter(l=>l.type==='pass').length} sig · ${(S.log||[]).filter(l=>l.type==='fail').length} fil`);
+  const pr = S.scan_progress || {};
+  put('scanline', pr.total ? `${pr.done}/${pr.total} ${pr.sym||''}` : '');
 
-function trendSpan(t, isBool) {
-  if (isBool) return t ? `<span style="color:${TEAL}; font-weight:600">BULL</span>` : `<span style="color:${PINK}; font-weight:600">BEAR</span>`;
-  const c = t==='bull' ? TEAL : (t==='bear' ? PINK : AMBER);
-  return `<span style="color:${c}; font-weight:600">${(t||'—').toUpperCase()}</span>`;
-}
-
-function renderMarket() {
-  $('mi-1h').outerHTML = `<span id="mi-1h">${trendSpan(S.btc_trend)}</span>`;
-  $('mi-4h').outerHTML = `<span id="mi-4h">${trendSpan(S.btc_4h_trend)}</span>`;
-  $('mi-1d').outerHTML = `<span id="mi-1d">${trendSpan(S.btc_daily_bull, true)}</span>`;
-  const m = S.btc_5m_mom || 0;
-  $('mi-btc').textContent = fsign(m)+'%'; $('mi-btc').style.color = m>=0 ? TEAL : PINK;
-  $('mi-fng').textContent = S.fear_greed ?? '—';
-}
-
-const LOG_MAP = {
-  pass:{c:TEAL,  bg:'rgba(0,255,204,0.1)',   b:'rgba(0,255,204,0.12)',  cbg:'rgba(0,255,204,0.025)',  lbl:'SIGNAL'},
-  exec:{c:TEAL,  bg:'rgba(0,255,204,0.14)',  b:'rgba(0,255,204,0.25)',  cbg:'rgba(0,255,204,0.05)',   lbl:'EXECUTED'},
-  fail:{c:AMBER, bg:'rgba(245,158,11,0.1)',  b:'rgba(245,158,11,0.12)', cbg:'rgba(245,158,11,0.02)',  lbl:'FILTER'},
-  warn:{c:PINK,  bg:'rgba(255,0,128,0.1)',   b:'rgba(255,0,128,0.12)',  cbg:'rgba(255,0,128,0.025)',  lbl:'ALERT'},
-  exit:{c:PINK,  bg:'rgba(255,0,128,0.12)',  b:'rgba(255,0,128,0.2)',   cbg:'rgba(255,0,128,0.04)',   lbl:'EXIT'},
-  info:{c:VIOLET,bg:'rgba(112,0,255,0.1)',   b:'rgba(112,0,255,0.12)',  cbg:'rgba(112,0,255,0.02)',   lbl:'INFO'},
-  scan:{c:CYAN,  bg:'rgba(6,182,212,0.1)',   b:'rgba(6,182,212,0.12)',  cbg:'rgba(6,182,212,0.02)',   lbl:'SCAN'},
-};
-
-function renderSignals() {
-  const logs = S.log || [];   // newest first
-  $('feed-scan').textContent = '#' + (S.scan_count||0);
-  $('cnt-sig').textContent = logs.filter(l=>l.type==='pass'||l.type==='exec').length;
-  $('cnt-fil').textContent = logs.filter(l=>l.type==='fail').length;
-  $('cnt-alr').textContent = logs.filter(l=>l.type==='warn'||l.type==='exit').length;
-
-  const cards = logs.slice(0, 40).map(l => {
-    const m = LOG_MAP[l.type] || LOG_MAP.info;
-    const msg = l.msg || '';
-    const symMatch = msg.match(/\b([A-Z0-9]{2,20}USDT)\b/);
-    const confMatch = msg.match(/(\d{1,3})%/);
-    const conf = confMatch ? Math.min(99, +confMatch[1]) : null;
-    const isLong = /LONG|▲/i.test(msg), isShort = /SHORT|▼/i.test(msg);
-    const dirSym = isLong ? '▲' : (isShort ? '▼' : '');
-    const dirCol = isLong ? TEAL : PINK;
-    const strength = conf !== null ? Math.max(1, Math.min(10, Math.round(conf/10))) : 5;
-    const shortMsg = msg.length > 26 ? msg.slice(0, 26)+'…' : msg;
-    return `<div class="sigcard" style="border:1px solid ${m.b}; border-top:2px solid ${m.c}; background:${m.cbg}">
-      <div style="position:absolute; top:0; right:0; width:40px; height:40px; background:radial-gradient(circle at top right, ${m.c}, transparent 70%); opacity:0.12; pointer-events:none"></div>
-      <div style="display:flex; align-items:center; justify-content:space-between">
-        <span style="color:${m.c}; font-size:7.5px; font-weight:700; letter-spacing:0.14em; background:${m.bg}; padding:1px 6px">${m.lbl}</span>
-        <span class="mono" style="color:#1a1a3a; font-size:8px">${l.ts||''}</span>
-      </div>
-      <div style="display:flex; align-items:center; justify-content:space-between">
-        <div style="display:flex; align-items:center; gap:5px">
-          <span style="color:#c0c0e8; font-size:11px; font-weight:700">${symMatch ? symMatch[1] : '—'}</span>
-          ${dirSym ? `<span style="color:${dirCol}; font-size:13px; font-weight:700; line-height:1">${dirSym}</span>` : ''}
-        </div>
-        ${conf !== null ? `<span class="bebas" style="color:${m.c}; font-size:12px; font-weight:700; letter-spacing:0.05em">${conf}%</span>` : ''}
-      </div>
-      <div>
-        <div style="height:3px; background:rgba(255,255,255,0.05); overflow:hidden">
-          <div style="height:100%; background:${m.c}; width:${strength*10}%; box-shadow:0 0 6px ${m.c}; opacity:0.85"></div>
-        </div>
-        <div style="display:flex; justify-content:space-between; margin-top:3px">
-          <span class="mono" style="color:#1a1a3a; font-size:7.5px" title="${msg.replace(/"/g,'&quot;')}">${shortMsg}</span>
-          <span class="mono" style="color:#2a2a4a; font-size:7.5px">STR ${strength}/10</span>
-        </div>
-      </div>
+  const el = $('feed');
+  const rows = logs.slice(0, 60);
+  const key = rows.length ? rows[0].ts + rows[0].msg.slice(0,30) + rows.length : '';
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.innerHTML = rows.map(l => {
+    const [lbl, bg, col] = CHIP[l.type];
+    const m = l.msg || '';
+    const sym  = (m.match(/\b([A-Z0-9]{2,20}USDT)\b/) || [])[1] || '';
+    const conf = l.type !== 'exit' ? (m.match(/(\d{1,3})%/) || [])[1] : null;
+    const dir  = /LONG|▲/.test(m) ? '▲' : (/SHORT|▼/.test(m) ? '▼' : '');
+    let detail = m.replace(sym, '').replace(/^\W+/, '').slice(0, 60);
+    return `<div class="frow">
+      <span class="t mono">${l.ts||''}</span>
+      <span class="chip" style="background:${bg}; color:${col}">${lbl}</span>
+      <span class="s">${sym||'—'}</span>
+      <span class="d" style="color:${dir==='▲'?TEAL:PINK}">${dir}</span>
+      <span class="cf" style="color:${col}">${conf?conf+'%':''}</span>
+      <span class="bar"><i style="width:${Math.min(99,conf||0)}%; background:${col}"></i></span>
+      <span class="m" title="${m.replace(/"/g,'&quot;')}">${detail}</span>
     </div>`;
-  });
-  setHTML('sig-cards', cards.join(''));
+  }).join('') || '<div style="text-align:center; padding:20px; color:var(--faint)">waiting for signals…</div>';
 }
 
+/* ── right rail ── */
+function renderRail() {
+  const wr = S.win_rate||0, fng = S.fear_greed||0, dd = Math.abs(S.max_dd||0), rsi = S.btc_rsi||0;
+  $('g-wr').style.width = Math.min(100,wr)+'%';   put('gv-wr', wr+'%');
+  $('g-fng').style.width = Math.min(100,fng)+'%'; put('gv-fng', String(fng));
+  $('g-dd').style.width = Math.min(100,dd)+'%';   put('gv-dd', dd.toFixed(1)+'%');
+  $('g-rsi').style.width = Math.min(100,rsi)+'%'; put('gv-rsi', String(Math.round(rsi)));
+
+  put('a-risk', fmt$(S.risk_per_trade||0)+` (${(S.risk_pct||0).toFixed(1)}%)`,
+      (S.risk_pct||0) >= 5 ? PINK : '#38bdf8');
+  const tr = S.trades||[];
+  const gw = tr.filter(t=>t.is_win).reduce((a,t)=>a+t.pnl_usd,0);
+  const gl = Math.abs(tr.filter(t=>!t.is_win).reduce((a,t)=>a+t.pnl_usd,0));
+  const pf = gl > 0 ? gw/gl : (gw > 0 ? 99 : 0);
+  put('a-pf', pf.toFixed(2), pf >= 1.3 ? TEAL : (pf >= 1 ? '#f7b733' : PINK));
+  put('a-exp', tr.length ? sgn((gw-gl)/tr.length)+'$/trade' : '—', tr.length && (gw-gl) > 0 ? TEAL : PINK);
+  put('a-aw', sgn(S.avg_win||0)+'%'); put('a-al', sgn(S.avg_loss||0)+'%');
+  if (tr.length) {
+    const us = tr.map(t=>t.pnl_usd);
+    put('a-bw', `${sgn(Math.max(...us))} / ${sgn(Math.min(...us))}`);
+  }
+  put('a-sess', (S.session||'—').toUpperCase());
+  put('twl', `${S.wins||0}W/${S.losses||0}L`); put('twr', 'WR '+(S.win_rate||0)+'%');
+  put('ttot', 'Total '+sgn(S.total_pnl||0)+'$', pcol(S.total_pnl||0));
+  put('tpf', 'PF '+pf.toFixed(2));
+}
+
+/* ── trades strip ── */
 function renderTrades() {
-  const trades = (S.trades || []).slice(-24).reverse();
-  $('tr-wl').textContent = `${S.wins||0}W / ${S.losses||0}L`;
-  $('tr-wr').textContent = `WR ${S.win_rate||0}%`;
-  const tt = $('tr-total'); tt.textContent = `Total ${fsign(S.total_pnl)}$`; tt.style.color = pnlCol(S.total_pnl);
-
-  const winU  = (S.trades||[]).filter(t=>t.is_win).reduce((a,t)=>a+t.pnl_usd,0);
-  const lossU = Math.abs((S.trades||[]).filter(t=>!t.is_win).reduce((a,t)=>a+t.pnl_usd,0));
-  const pf = lossU > 0 ? (winU/lossU).toFixed(2) : (winU > 0 ? '∞' : '—');
-  $('tr-pf').textContent = `PF ${pf}`;
-  $('tr-avg').textContent = `AvgW ${fsign(S.avg_win||0)}% / AvgL ${fsign(S.avg_loss||0)}%`;
-
-  setHTML('trade-grid', trades.map(t => {
-    const rc = t.is_win ? TEAL : PINK;
-    const dc = t.direction==='long' ? TEAL : PINK;
-    return `<div class="tradecell" style="border-top:2px solid ${rc}">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px">
-        <span style="color:${dc}; font-size:12px; font-weight:700">${t.direction==='long'?'▲':'▼'}</span>
-        <span class="mono" style="color:#1a1a3a; font-size:8px">${t.close_time||''}</span>
-      </div>
-      <div style="color:#b0b0d8; font-size:10px; font-weight:700; margin-bottom:2px">${t.symbol}</div>
-      <div class="bebas" style="font-size:18px; color:${pnlCol(t.pnl_pct)}; line-height:1; margin-bottom:2px">${fsign(t.pnl_pct)}%</div>
-      <div style="color:${rc}; font-size:7.5px; font-weight:700; letter-spacing:0.1em">${t.is_win?'WIN':'LOSS'} · ${(t.reason||'').slice(0,14)}</div>
-      <div class="mono" style="color:#1a1a3a; font-size:8px; margin-top:1px">${fsign(t.pnl_usd)}$</div>
+  const tr = (S.trades||[]).slice(-30).reverse();
+  const el = $('tstrip');
+  const key = tr.length ? tr[0].id + '-' + tr.length : '';
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.innerHTML = tr.map(t => {
+    const col = t.is_win ? TEAL : PINK;
+    return `<div class="tcell" style="border-top:2px solid ${col}">
+      <div class="top1"><span style="color:${t.direction==='long'?TEAL:PINK}; font-weight:700">${t.direction==='long'?'▲':'▼'}</span><span class="mono">${(t.close_time||'').slice(0,5)}</span></div>
+      <div class="sym">${(t.symbol||'').replace('USDT','')}</div>
+      <div class="pct" style="color:${pcol(t.pnl_pct)}">${sgn(t.pnl_pct)}%</div>
+      <div class="why" style="color:${col}">${t.is_win?'✓ WIN':'✗ LOSS'} · ${(t.reason||'').slice(0,14)}</div>
+      <div class="usd mono">${sgn(t.pnl_usd)}$</div>
     </div>`;
-  }).join('') || '<div style="grid-column:1/-1; color:#1a1a3a; font-size:10px; text-align:center; align-self:center">No closed trades yet</div>');
+  }).join('') || '<div style="padding:20px; color:var(--faint)">No closed trades yet</div>';
 }
 
-function renderFooter() {
-  $('ft-pause').innerHTML = S.paused
-    ? `<span style="color:${AMBER}">⏸ PAUSED — ${S.pause_reason||''}</span>` : '';
-  $('ft-exch').textContent = S.paper_mode ? 'BINANCE · PAPER' : 'BINANCE · TESTNET';
-}
+/* ── chart: day-1 line, gradient fill, grid, markers, crosshair ── */
+const cv = $('cv');
+function sizeCv() { const w=cv.offsetWidth, h=cv.offsetHeight; if (w&&h){ cv.width=w; cv.height=h; draw(); } }
+window.addEventListener('resize', sizeCv); setTimeout(sizeCv, 120);
+cv.addEventListener('mousemove', e => { const r=cv.getBoundingClientRect(); mouse.x=(e.clientX-r.left)*(cv.width/r.width); draw(); });
+cv.addEventListener('mouseleave', () => { mouse.x=-1; draw(); });
 
-// ── Canvas chart ──────────────────────────────────────────────────────────────
-const canvas = $('chart');
-function resizeCanvas() {
-  const w = canvas.offsetWidth, h = canvas.offsetHeight;
-  if (w > 0 && h > 0) { canvas.width = w; canvas.height = h; drawChart(); }
-}
-window.addEventListener('resize', resizeCanvas);
-setTimeout(resizeCanvas, 150);
-
-let chartMouse = {x:-1, y:-1};
-(function(){
-  const cv = document.getElementById('chart');
-  cv.addEventListener('mousemove', e => {
-    const r = cv.getBoundingClientRect();
-    chartMouse.x = (e.clientX - r.left) * (cv.width / r.width);
-    chartMouse.y = (e.clientY - r.top) * (cv.height / r.height);
-    drawChart();
-  });
-  cv.addEventListener('mouseleave', () => { chartMouse.x = -1; drawChart(); });
-})();
-
-function drawChart() {
-  if (!canvas.width) resizeCanvas();
-  const ctx = canvas.getContext('2d');
-  const bh = balHist;
-  const W = canvas.width, H = canvas.height;
+function draw() {
+  if (!cv.width) return;
+  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
   ctx.clearRect(0, 0, W, H);
-  if (bh.length < 2) return;
+  if (curve.length < 2) return;
+  const vs = curve.map(p=>p.v), n = curve.length;
+  const lo = Math.min(...vs)*0.995, hi = Math.max(...vs)*1.005, rg = (hi-lo)||1;
+  const X = i => (i/(n-1))*W, Y = v => H - ((v-lo)/rg)*(H*0.86) - H*0.07;
 
-  const ac = a => `rgba(0,255,204,${a})`;
-
-  // grid
-  ctx.strokeStyle = ac(0.04); ctx.lineWidth = 1; ctx.setLineDash([2,10]);
-  for (let i=1;i<=4;i++){ctx.beginPath();ctx.moveTo(0,H*i/5);ctx.lineTo(W,H*i/5);ctx.stroke();}
-  for (let i=1;i<=5;i++){ctx.beginPath();ctx.moveTo(W*i/5,0);ctx.lineTo(W*i/5,H);ctx.stroke();}
-  ctx.setLineDash([]);
-
-  const vals = bh.map(h=>h.v);
-  const minV = Math.min(...vals)*0.9995, maxV = Math.max(...vals)*1.0005;
-  const range = (maxV-minV)||1, n = bh.length;
-  const tx = i => (i/(n-1))*W;
-  const ty = v => H - ((v-minV)/range)*(H*0.88) - H*0.06;
-
-  // y labels
-  ctx.fillStyle = ac(0.25); ctx.font = '9px "JetBrains Mono", monospace'; ctx.textAlign = 'left';
-  for (let i=0;i<=4;i++){ const v = minV+range*i/4; ctx.fillText('$'+v.toLocaleString('en-US',{maximumFractionDigits:2}), 8, ty(v)-3); }
-
-  // start balance ref line
-  if (startBal && minV <= startBal && maxV >= startBal) {
-    const refY = ty(startBal);
-    ctx.beginPath(); ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.lineWidth=1;
-    ctx.setLineDash([6,8]); ctx.moveTo(0,refY); ctx.lineTo(W,refY); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle='rgba(255,255,255,0.15)'; ctx.font='8px "JetBrains Mono",monospace';
-    ctx.fillText('START $'+startBal.toLocaleString('en-US',{maximumFractionDigits:2}), 8, refY-4);
+  // grid + y labels
+  ctx.font = '10px JetBrains Mono'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + rg*i/4, y = Y(v);
+    ctx.strokeStyle = 'rgba(0,229,192,.05)'; ctx.setLineDash([3,9]);
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(150,150,220,.35)';
+    ctx.fillText('$'+v.toLocaleString('en-US',{maximumFractionDigits:0}), 8, y-2);
   }
-
-  const curve = () => {
-    ctx.moveTo(tx(0), ty(bh[0].v));
-    for (let i=1;i<n;i++){
-      const x0=tx(i-1),y0=ty(bh[i-1].v),x1=tx(i),y1=ty(bh[i].v);
-      ctx.bezierCurveTo((x0+x1)/2,y0,(x0+x1)/2,y1,x1,y1);
-    }
-  };
-
-  // area fill
-  const grad = ctx.createLinearGradient(0,0,0,H);
-  grad.addColorStop(0, ac(0.18)); grad.addColorStop(0.6, ac(0.04)); grad.addColorStop(1, ac(0));
-  ctx.beginPath(); curve(); ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
-
-  // line with glow
-  ctx.beginPath(); curve();
-  ctx.strokeStyle = TEAL; ctx.lineWidth = 1.8;
-  ctx.shadowBlur = 12; ctx.shadowColor = ac(0.8);
+  // start-capital line
+  if (startCap > lo && startCap < hi) {
+    const y = Y(startCap);
+    ctx.strokeStyle = 'rgba(255,255,255,.12)'; ctx.setLineDash([7,7]);
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // area fill + line
+  const path = () => { ctx.moveTo(X(0), Y(vs[0])); for (let i=1;i<n;i++) ctx.lineTo(X(i), Y(vs[i])); };
+  const gr = ctx.createLinearGradient(0,0,0,H);
+  gr.addColorStop(0,'rgba(0,229,192,.16)'); gr.addColorStop(1,'rgba(0,229,192,0)');
+  ctx.beginPath(); path(); ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath(); ctx.fillStyle = gr; ctx.fill();
+  ctx.beginPath(); path();
+  ctx.strokeStyle = TEAL; ctx.lineWidth = 1.8; ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(0,229,192,.7)';
   ctx.stroke(); ctx.shadowBlur = 0;
 
+  // ATH / low markers
+  const iH = vs.indexOf(Math.max(...vs)), iL = vs.indexOf(Math.min(...vs));
+  ctx.textAlign='center'; ctx.font='bold 10px JetBrains Mono';
+  ctx.fillStyle = TEAL; ctx.fillText('▲', X(iH), Y(vs[iH])-8);
+  ctx.fillStyle = PINK; ctx.fillText('▼', X(iL), Y(vs[iL])+16);
+
   // live dot
-  const lx = tx(n-1), ly = ty(bh[n-1].v);
-  const dg = ctx.createRadialGradient(lx,ly,0,lx,ly,20);
-  dg.addColorStop(0, ac(0.5)); dg.addColorStop(1, ac(0));
-  ctx.beginPath(); ctx.arc(lx,ly,20,0,Math.PI*2); ctx.fillStyle=dg; ctx.fill();
-  ctx.beginPath(); ctx.arc(lx,ly,4,0,Math.PI*2);
-  ctx.fillStyle=TEAL; ctx.shadowBlur=14; ctx.shadowColor=ac(1); ctx.fill(); ctx.shadowBlur=0;
-  ctx.beginPath(); ctx.arc(lx,ly,2,0,Math.PI*2); ctx.fillStyle='#ffffff'; ctx.fill();
-  ctx.fillStyle=TEAL; ctx.font='bold 9px "DM Sans",sans-serif';
-  ctx.textAlign='left'; ctx.textBaseline='middle';
-  ctx.fillText('◆ LIVE', Math.min(lx+12, W-46), ly);
+  const lx = X(n-1), ly = Y(vs[n-1]);
+  ctx.beginPath(); ctx.arc(lx,ly,3.5,0,7); ctx.fillStyle=TEAL; ctx.shadowBlur=12; ctx.shadowColor=TEAL; ctx.fill(); ctx.shadowBlur=0;
 
-  // ATH / LOW markers
-  const iHi = vals.indexOf(Math.max(...vals)), iLo = vals.indexOf(Math.min(...vals));
-  ctx.font='bold 9px "JetBrains Mono",monospace'; ctx.textBaseline='middle';
-  ctx.fillStyle=TEAL; ctx.textAlign='center';
-  ctx.fillText('▲', tx(iHi), ty(vals[iHi])-10);
-  ctx.fillStyle='#ff0080';
-  ctx.fillText('▼', tx(iLo), ty(vals[iLo])+11);
-
-  // crosshair (mouse hover)
-  if (chartMouse.x >= 0) {
-    const ci = Math.max(0, Math.min(n-1, Math.round(chartMouse.x/W*(n-1))));
-    const cx = tx(ci), cy = ty(bh[ci].v);
-    ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1; ctx.setLineDash([3,5]);
+  // crosshair + tooltip
+  if (mouse.x >= 0) {
+    const i = Math.max(0, Math.min(n-1, Math.round(mouse.x/W*(n-1))));
+    const cx = X(i), cyy = Y(vs[i]);
+    ctx.strokeStyle='rgba(255,255,255,.14)'; ctx.setLineDash([3,5]);
     ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,cy); ctx.lineTo(W,cy); ctx.stroke(); ctx.setLineDash([]);
-    ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
-    const t = new Date(bh[ci].t), pad=6;
-    const txt = '$'+bh[ci].v.toLocaleString('en-US',{minimumFractionDigits:2})+'  '+
-                t.toLocaleTimeString('en-IN',{hour12:false})+' '+t.toLocaleDateString('en-IN',{day:'2-digit',month:'short'});
-    ctx.font='10px "JetBrains Mono",monospace';
-    const tw = ctx.measureText(txt).width;
-    const bx = Math.min(Math.max(cx+10, 4), W-tw-pad*2-4), by = Math.max(cy-28, 4);
-    ctx.fillStyle='rgba(8,8,20,0.92)'; ctx.strokeStyle='rgba(0,255,204,0.35)';
-    ctx.fillRect(bx,by,tw+pad*2,18); ctx.strokeRect(bx,by,tw+pad*2,18);
-    ctx.fillStyle='#c0f0e8'; ctx.textAlign='left';
-    ctx.fillText(txt, bx+pad, by+9);
+    ctx.beginPath(); ctx.moveTo(0,cyy); ctx.lineTo(W,cyy); ctx.stroke(); ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(cx,cyy,4,0,7); ctx.fillStyle='#fff'; ctx.fill();
+    const d = new Date(curve[i].t);
+    const txt = `${fmt$(vs[i])}   ${d.toLocaleDateString('en-IN',{day:'2-digit',month:'short'})} ${d.toLocaleTimeString('en-IN',{hour12:false,hour:'2-digit',minute:'2-digit'})}`;
+    ctx.font='11px JetBrains Mono';
+    const tw = ctx.measureText(txt).width, bx = Math.min(Math.max(cx+12,6), W-tw-20), by = Math.max(cyy-30,6);
+    ctx.fillStyle='rgba(6,6,15,.94)'; ctx.strokeStyle='rgba(0,229,192,.4)';
+    ctx.fillRect(bx,by,tw+14,20); ctx.strokeRect(bx,by,tw+14,20);
+    ctx.fillStyle='#cdeee6'; ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(txt, bx+7, by+10);
   }
-
-  // watermark
-  ctx.save(); ctx.font='bold 72px "Bebas Neue",sans-serif';
-  ctx.fillStyle=ac(0.02); ctx.textAlign='right'; ctx.textBaseline='bottom';
-  ctx.fillText('ATLAS', W-18, H-12); ctx.restore();
-
-  // hi/lo labels
-  $('chart-hi').textContent = '$'+Math.max(...vals).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-  $('chart-lo').textContent = '$'+Math.min(...vals).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const sessPct = startBal ? ((bh[n-1].v/startBal)-1)*100 : 0;
-  $('chart-sess').textContent = 'Session ' + fsign(sessPct,3) + '%';
 }
 </script>
 </body>
