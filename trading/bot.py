@@ -830,6 +830,9 @@ class AlphaBot:
             'btc_price':      round(self._mark_prices.get('BTCUSDT', 0.0), 2),
             'wallet_curve':   self.wallet_curve,
             'wallet_start':   self.wallet_start,
+            'top_setups':     [{'s': r.get('symbol',''), 'd': r.get('direction',''),
+                                'c': round(r.get('confidence',0),1)}
+                               for r in (self.scan_results or [])[:6]],
             'paper_mode':      config.PAPER_MODE,
             'btc_trend':       self._btc_trend,
             'btc_4h_trend':    self._btc_4h_trend,

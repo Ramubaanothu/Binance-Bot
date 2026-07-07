@@ -105,6 +105,7 @@ _lock             = threading.Lock()
 _S                = {}                    # latest WS state snapshot
 _log_feed         = deque(maxlen=120)     # raw log entries for scanner panel
 _connected        = False
+_last_msg_ts      = 0.0                   # last WS state received (bot health)
 _quit_evt         = threading.Event()
 _action           = None                  # pending keyboard action
 _balance_history  = deque(maxlen=20000)   # (unix_ts, balance) — FULL wallet history
@@ -133,7 +134,7 @@ _load_balance_history()
 
 # ─── WebSocket listener ───────────────────────────────────────────────────────
 def _ws_thread():
-    global _connected
+    global _connected, _last_msg_ts
     # Resolve to IPv4 explicitly — avoids localhost→::1 on Windows
     ws_url = WS_URL.replace('localhost', '127.0.0.1')
 
@@ -1068,34 +1069,311 @@ def _footer() -> Rule:
         style='#123a33',
     )
 
+
+# ═══════════════════════════ ALPHABOT V6 PANELS ═══════════════════════════════
+def _hdr6(S: dict) -> Panel:
+    from datetime import datetime as _dt, timedelta as _td
+    ist = (_dt.utcnow() + _td(hours=5, minutes=30)).strftime('%H:%M:%S')
+    t = Text(justify='center')
+    t.append('ALPHABOT ', style=f'bold {TEAL}')
+    t.append('V6', style=f'bold {VIOLET}')
+    t.append('    Binance Futures · Testnet    ', style=FAINT)
+    if not _connected:
+        t.append('● OFFLINE', style=f'bold {PINK}')
+    elif S.get('paused'):
+        t.append('⏸ PAUSED', style=f'bold {AMBER}')
+    else:
+        t.append('● LIVE', style=f'bold {TEAL}')
+    bp = S.get('btc_price', 0) or 0
+    if bp: t.append(f'    BTC ${bp:,.0f}', style=f'bold #f7c948')
+    t.append(f"    {(S.get('session') or '—').upper()}", style=CYAN2)
+    t.append(f'    IST {ist}', style=f'bold {TXT}')
+    return Panel(t, border_style='#123a33', padding=(0, 0))
+
+
+def _kpi6(S: dict) -> Panel:
+    ps      = S.get('positions') or []
+    bal     = S.get('balance', 0.0)
+    unreal  = sum(p.get('pnl_usd', 0) for p in ps)
+    equity  = bal + unreal
+    dpnl    = S.get('daily_pnl', 0.0)
+    tpnl    = S.get('total_pnl', 0.0)
+    dd      = S.get('max_dd', 0) or 0
+    wr      = S.get('win_rate', 0) or 0
+    # open risk: distance from entry to the CURRENT stop, in dollars
+    risk = 0.0
+    for p in ps:
+        sgn = 1 if p.get('direction') == 'long' else -1
+        e, ts_ = p.get('entry', 0), p.get('trail_sl', 0)
+        if e: risk += max(0.0, sgn * (e - ts_) / e) * (p.get('size_usd', 0) or 0)
+    feed_age = time.time() - _last_msg_ts if _last_msg_ts else 999
+
+    g = Table.grid(expand=True)
+    for _ in range(9): g.add_column(justify='center')
+    def cell(lbl, val, col):
+        c = Text(justify='center')
+        c.append(lbl + '\n', style=FAINT)
+        c.append(val, style=f'bold {col}')
+        return c
+    g.add_row(
+        cell('BALANCE',  f'${bal:,.2f}',   TXT),
+        cell('EQUITY',   f'${equity:,.2f}', TEAL if unreal >= 0 else PINK),
+        cell('DAY PNL',  f'{dpnl:+,.2f}',  _pcol(dpnl)),
+        cell('TOTAL',    f'{tpnl:+,.2f}',  _pcol(tpnl)),
+        cell('OPEN RISK', f'${risk:,.0f}', PINK if risk > bal * 0.1 else AMBER),
+        cell('MAX DD',   f'{dd:.1f}%',     PINK if dd > 20 else AMBER),
+        cell('WIN',      f'{wr:.0f}%',     TEAL if wr >= 55 else AMBER),
+        cell('POSITIONS', f"{len(ps)}/5",  TEAL),
+        cell('WS',       '✓' if feed_age < 5 else f'{feed_age:.0f}s', TEAL if feed_age < 5 else PINK),
+    )
+    return Panel(g, border_style='#123a33', padding=(0, 1))
+
+
+def _matrix6(S: dict) -> Panel:
+    mi   = S.get('market_intel') or {}
+    fng  = int(S.get('fear_greed', 50) or 50)
+    mood = str(mi.get('market_mood', '—'))
+    up, dn = mi.get('up_count', 0), mi.get('down_count', 0)
+    def arrow(t):
+        if t in ('bull', True):  return ('▲', TEAL)
+        if t in ('bear', False): return ('▼', PINK)
+        return ('■', AMBER)
+    t = Text()
+    for lbl, trend in (('BTC 1H', S.get('btc_trend')), ('BTC 4H', S.get('btc_4h_trend')),
+                       ('BTC 1D', S.get('btc_daily_bull'))):
+        a, c = arrow(trend)
+        name = trend if isinstance(trend, str) else ('bull' if trend else 'bear')
+        t.append(f'  {lbl:<8}', style=FAINT)
+        t.append(f'{a} {str(name).upper()}\n', style=f'bold {c}')
+    t.append(f'  {"RSI":<8}', style=FAINT)
+    rsi = S.get('btc_rsi', 0) or 0
+    t.append(f'{rsi:.0f}\n', style=f'bold {_pcol(50 - abs(rsi - 50)) if rsi else FAINT}')
+    t.append('  ────────────────\n', style='#1a1a3a')
+    mc = TEAL if 'BULL' in mood else (PINK if 'BEAR' in mood else AMBER)
+    t.append(f'  {"MARKET":<8}', style=FAINT)
+    t.append(f'{mood}\n', style=f'bold {mc}')
+    t.append(f'  {"BREADTH":<8}', style=FAINT)
+    t.append(f'{up}▲ ', style=TEAL); t.append(f'{dn}▼\n', style=PINK)
+    t.append(f'  {"F&G":<8}', style=FAINT)
+    k = max(0, min(10, round(fng / 10)))
+    t.append('█' * k, style=AMBER); t.append('░' * (10 - k), style='#1a1a3a')
+    t.append(f' {fng}\n', style=f'bold {AMBER}')
+    return Panel(t, title=f'[bold {VIOLET}]TREND MATRIX[/]', border_style='#123a33')
+
+
+def _equity6(S: dict) -> Panel:
+    bal   = S.get('balance', 0.0)
+    curve = S.get('wallet_curve') or []
+    if len(curve) > 2:
+        pts = [(float(a), float(b)) for a, b in curve] + ([(time.time(), bal)] if bal else [])
+        start = S.get('wallet_start') or pts[0][1]
+    else:
+        pts   = list(_balance_history)
+        start = (bal - S.get('total_pnl', 0.0)) or bal
+    if len(pts) < 3:
+        return Panel(Text('\n  collecting equity history…', style=FAINT),
+                     title=f'[bold {TEAL}]EQUITY CURVE[/]', border_style='#123a33')
+    vals = [v for _, v in pts]
+    try:    term_w = os.get_terminal_size().columns
+    except Exception: term_w = 170
+    max_lw = len(f'${max(vals):,.0f}')
+    W = max(40, term_w - 34 - max_lw - 8)
+    rows, lo, hi = _braille_line(vals, W, 6, start)
+    at = (bal - start) / start * 100 if start else 0
+    pk, dd = vals[0] or 1, 0.0
+    for v in vals:
+        pk = max(pk, v)
+        if pk: dd = max(dd, (pk - v) / pk * 100)
+    body = Text()
+    body.append(f'  ${bal:,.2f}  ', style=f'bold {TXT}')
+    body.append('ALL-TIME ', style=FAINT); body.append(f'{at:+.2f}%  ', style=f'bold {_pcol(at)}')
+    body.append('MaxDD ', style=FAINT);    body.append(f'-{dd:.1f}%  ', style=f'bold {PINK}')
+    body.append('ATH ', style=FAINT);      body.append(f'${hi:,.0f}  ', style=TEAL)
+    body.append('Low ', style=FAINT);      body.append(f'${lo:,.0f}\n', style=PINK)
+    labels = [f'${hi - (hi - lo) * i / 5:,.0f}' for i in range(6)]
+    for i, ln in enumerate(rows):
+        body.append(f' {labels[i]:>{max_lw}} │', style='dim')
+        body.append_text(ln); body.append('\n')
+    return Panel(body, title=f'[bold {TEAL}]EQUITY CURVE · BINANCE DAY-1[/]', border_style='#123a33')
+
+
+def _positions6(S: dict) -> Panel:
+    ps = S.get('positions') or []
+    tbl = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 0),
+                header_style='bold dim', show_edge=False)
+    for col, w, j in (('Pair', 12, 'left'), ('Side', 7, 'left'), ('Lev', 4, 'right'),
+                      ('Entry', 10, 'right'), ('Current', 10, 'right'), ('PnL %', 8, 'right'),
+                      ('PnL $', 9, 'right'), ('Trail SL', 10, 'right'), ('Value', 9, 'right'),
+                      ('Ph', 5, 'left')):
+        tbl.add_column(col, width=w, justify=j, no_wrap=True)
+    if not ps:
+        tbl.add_row(Text('No positions — scanning…', style=FAINT), *[''] * 9)
+    for p in ps:
+        is_l = p.get('direction') == 'long'
+        pc   = _pcol(p.get('pnl_pct', 0))
+        ph   = _PHASE_NAMES.get(p.get('phase', 'open'), (str(p.get('phase', ''))[:4].upper(), ''))[0]
+        tbl.add_row(
+            Text(p.get('symbol', ''), style=f'bold {TXT}'),
+            Text('▲ LONG' if is_l else '▼ SHORT', style=f'bold {TEAL if is_l else PINK}'),
+            Text(f"{p.get('leverage', 10)}x", style=FAINT),
+            Text(_fmt_price(p.get('entry', 0)), style=FAINT),
+            Text(_fmt_price(p.get('current', 0)), style=TXT),
+            Text(f"{p.get('pnl_pct', 0):+.2f}%", style=f'bold {pc}'),
+            Text(f"{p.get('pnl_usd', 0):+.2f}", style=f'bold {pc}'),
+            Text(_fmt_price(p.get('trail_sl', 0)), style=AMBER),
+            Text(f"${p.get('size_usd', 0):,.0f}", style=VIOLET),
+            Text(ph, style=f'bold {VIOLET}'),
+        )
+    tot = sum(p.get('pnl_usd', 0) for p in ps)
+    title = (f'[bold {TEAL}]ACTIVE POSITIONS[/]  [{TXT}]{len(ps)}[/][{FAINT}]/5[/]  '
+             f'[{_pcol(tot)}]{tot:+.2f}$[/]  [{FAINT}](LIVE)[/]')
+    return Panel(tbl, title=title, border_style='#123a33', padding=(0, 0))
+
+
+def _watch6(S: dict) -> Panel:
+    mi = S.get('market_intel') or {}
+    t = Text()
+    for g in (mi.get('top_gainers') or [])[:4]:
+        t.append(f"  {str(g.get('symbol',''))[:11]:<12}", style=TXT)
+        t.append(f"{g.get('change_pct',0):+6.1f}%\n", style=f'bold {TEAL}')
+    for l in (mi.get('top_losers') or [])[:4]:
+        t.append(f"  {str(l.get('symbol',''))[:11]:<12}", style=TXT)
+        t.append(f"{l.get('change_pct',0):+6.1f}%\n", style=f'bold {PINK}')
+    if not t.plain:
+        t.append('\n  waiting for scan…', style=FAINT)
+    return Panel(t, title=f'[bold {AMBER}]WATCHLIST[/]', border_style='#3a2a08')
+
+
+def _pipe6(S: dict, frame: int) -> Panel:
+    logs = list(_log_feed)
+    n = lambda k: sum(1 for e in logs if e.get('type') == k)
+    pr = S.get('scan_progress') or {}
+    spin = SPIN_B[frame % len(SPIN_B)]
+    t = Text()
+    if pr.get('total'):
+        bw = 16
+        f_ = max(0, min(bw, round(pr['done'] / pr['total'] * bw)))
+        t.append(f'  {spin} SCAN ', style=TEAL)
+        t.append('▰' * f_, style=TEAL); t.append('▱' * (bw - f_), style='grey15')
+        t.append(f" {pr['done']}/{pr['total']}\n", style=TXT)
+        t.append(f"    {pr.get('sym','')}\n", style=FAINT)
+    else:
+        t.append(f'  {spin} waiting for scan…\n\n', style=FAINT)
+    stages = (('SIGNALS', n('pass'), TEAL), ('FILTERED', n('fail'), AMBER),
+              ('EXECUTED', n('exec'), TEAL), ('EXITS', n('exit'), PINK),
+              ('ALERTS', n('warn') + n('error'), PINK))
+    for lbl, v, c in stages:
+        t.append(f'  {lbl:<10}', style=FAINT)
+        t.append(f'{v}\n', style=f'bold {c}')
+    return Panel(t, title=f'[bold {VIOLET}]SIGNAL PIPELINE[/]', border_style='#123a33')
+
+
+def _health_setups6(S: dict) -> Panel:
+    feed_age = time.time() - _last_msg_ts if _last_msg_ts else 999
+    ok  = lambda b: ('✓', TEAL) if b else ('✗', PINK)
+    t = Text()
+    rows = (('API',       _connected and S.get('balance', 0) > 0),
+            ('WEBSOCKET', feed_age < 5),
+            ('SCANNER',   bool((S.get('scan_progress') or {}).get('total'))),
+            ('ORDERS',    not S.get('paused')))
+    for lbl, good in rows:
+        m, c = ok(good)
+        t.append(f'  {lbl:<10}', style=FAINT); t.append(f'{m}\n', style=f'bold {c}')
+    t.append(f'  {"FEED AGE":<10}', style=FAINT)
+    t.append(f'{feed_age:.0f}s\n', style=TEAL if feed_age < 5 else PINK)
+    t.append('  ──────────────\n', style='#1a1a3a')
+    t.append('  TOP SETUPS\n', style=f'bold {AMBER}')
+    setups = S.get('top_setups') or []
+    for s_ in setups[:5]:
+        d = s_.get('d', '')
+        t.append(f"  {str(s_.get('s',''))[:11]:<12}", style=TXT)
+        t.append('▲' if d == 'long' else '▼', style=f'bold {TEAL if d == "long" else PINK}')
+        t.append(f" {s_.get('c',0):>3.0f}%\n", style=f'bold {AMBER}')
+    if not setups:
+        t.append('  —\n', style=FAINT)
+    return Panel(t, title=f'[bold {TEAL}]BOT HEALTH[/]', border_style='#123a33')
+
+
+def _dur6(o, c):
+    try:
+        from datetime import datetime as _dt
+        a = _dt.strptime(str(o), '%H:%M:%S'); b = _dt.strptime(str(c), '%H:%M:%S')
+        s = ((b - a).seconds)
+        return f'{s // 3600}h{(s % 3600) // 60:02d}m' if s >= 3600 else f'{s // 60}m{s % 60:02d}s'
+    except Exception:
+        return '—'
+
+
+def _exec6(S: dict) -> Panel:
+    tr = list(reversed(S.get('trades') or []))[:20]
+    tbl = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 0),
+                header_style='bold dim', show_edge=False)
+    for col, w, j in (('Time', 9, 'left'), ('Pair', 13, 'left'), ('Side', 6, 'left'),
+                      ('Exit', 10, 'right'), ('RR', 5, 'right'), ('PnL %', 8, 'right'),
+                      ('PnL $', 9, 'right'), ('Reason', 14, 'left'), ('Dur', 8, 'right')):
+        tbl.add_column(col, width=w, justify=j, no_wrap=True)
+    if not tr:
+        tbl.add_row(Text('No executions yet', style=FAINT), *[''] * 8)
+    for x in tr[:6]:
+        is_l = x.get('direction') == 'long'
+        pc   = _pcol(x.get('pnl_usd', 0))
+        tbl.add_row(
+            Text(str(x.get('close_time', ''))[:8], style=FAINT),
+            Text(str(x.get('symbol', '')), style=f'bold {TXT}'),
+            Text('▲L' if is_l else '▼S', style=f'bold {TEAL if is_l else PINK}'),
+            Text(_fmt_price(x.get('exit', 0)), style=TXT),
+            Text(f"{x.get('rr_ratio', 0):.1f}", style=FAINT),
+            Text(f"{x.get('pnl_pct', 0):+.2f}%", style=f'bold {pc}'),
+            Text(f"{x.get('pnl_usd', 0):+.2f}", style=f'bold {pc}'),
+            Text(str(x.get('reason', ''))[:14], style=TEAL if x.get('is_win') else PINK),
+            Text(_dur6(x.get('open_time'), x.get('close_time')), style=FAINT),
+        )
+    # last-20 ribbon
+    rib = Text()
+    rib.append('  Last 20:  ', style=FAINT)
+    for x in tr:
+        c = TEAL if x.get('is_win') else PINK
+        rib.append(f"{str(x.get('symbol','')).replace('USDT','')[:4]}", style=c)
+        rib.append(f"{x.get('pnl_pct',0):+.0f} ", style=f'bold {c}')
+    wr = S.get('win_rate', 0)
+    title = (f'[bold {PINK}]LAST 20 EXECUTIONS[/]  '
+             f'[{FAINT}]{S.get("wins",0)}W/{S.get("losses",0)}L[/]  [{AMBER}]WR {wr:.0f}%[/]  '
+             f'[{_pcol(S.get("total_pnl",0))}]Total {S.get("total_pnl",0):+.2f}$[/]')
+    return Panel(Group(tbl, rib), title=title, border_style='#3a0a22', padding=(0, 0))
+
+
 # ─── Layout builder ───────────────────────────────────────────────────────────
 def _build(S: dict, frame: int) -> Layout:
     layout = Layout()
     layout.split_column(
-        Layout(name='header',    size=5),
-        Layout(name='body'),
-        Layout(name='bal_chart', size=12),  # advanced wallet tracker (2 stat rows + 6 chart + axis)
-        Layout(name='trades',    size=10),  # ATLAS trade card grid + last-20 ribbon
-        Layout(name='footer',    size=1),
+        Layout(name='header', size=3),
+        Layout(name='kpis',   size=4),
+        Layout(name='market', size=11),
+        Layout(name='positions', size=9),
+        Layout(name='midband',   ratio=1, minimum_size=9),
+        Layout(name='executions', size=11),
+        Layout(name='footer', size=1),
     )
-    layout['body'].split_row(
-        Layout(name='positions', ratio=7),
-        Layout(name='scanner',   ratio=5),
-        Layout(name='right_col', ratio=4),
+    layout['market'].split_row(
+        Layout(name='matrix', size=30),
+        Layout(name='equity', ratio=1),
     )
-    layout['body']['right_col'].split_column(
-        Layout(name='gauges', size=5),
-        Layout(name='stats',  size=12),     # trade analytics — risk, profit factor, expectancy
-        Layout(name='market', ratio=1),     # market fills remaining space
+    layout['midband'].split_row(
+        Layout(name='watch', size=26),
+        Layout(name='pipe',  size=34),
+        Layout(name='feed',  ratio=1),
+        Layout(name='health', size=28),
     )
-    layout['header'].update(_header(S))
-    layout['body']['positions'].update(_positions(S))
-    layout['body']['scanner'].update(_scanner(S, frame))
-    layout['body']['right_col']['gauges'].update(_gauges(S))
-    layout['body']['right_col']['stats'].update(_stats(S))
-    layout['body']['right_col']['market'].update(_market(S, frame))
-    layout['bal_chart'].update(_balance_chart(S))
-    layout['trades'].update(_trades(S))
+    layout['header'].update(_hdr6(S))
+    layout['kpis'].update(_kpi6(S))
+    layout['market']['matrix'].update(_matrix6(S))
+    layout['market']['equity'].update(_equity6(S))
+    layout['positions'].update(_positions6(S))
+    layout['midband']['watch'].update(_watch6(S))
+    layout['midband']['pipe'].update(_pipe6(S, frame))
+    layout['midband']['feed'].update(_scanner(S, frame))
+    layout['midband']['health'].update(_health_setups6(S))
+    layout['executions'].update(_exec6(S))
     layout['footer'].update(_footer())
     return layout
 
