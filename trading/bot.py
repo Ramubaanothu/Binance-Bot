@@ -1268,6 +1268,17 @@ class AlphaBot:
             if not inc or wallet <= 0:
                 return
             inc.sort(key=lambda r: int(r['time']))
+            # Testnet quirk: the faucet logs duplicate TRANSFER records (same
+            # amount, ~1s apart) but credits only one — drop the phantoms.
+            deduped, last_tr = [], None
+            for r in inc:
+                if r.get('incomeType') == 'TRANSFER':
+                    key = (r.get('income'), int(r['time']) // 10)
+                    if last_tr == key:
+                        continue
+                    last_tr = key
+                deduped.append(r)
+            inc = deduped
             total_income = sum(float(r.get('income', 0) or 0) for r in inc)
             run   = wallet - total_income      # pre-history equity (usually 0 —
             curve = []                          # the initial grant IS a TRANSFER record)
