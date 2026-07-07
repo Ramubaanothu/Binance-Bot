@@ -65,6 +65,7 @@ class Client:
         self.sess.headers['X-MBX-APIKEY'] = self.key
         self.step: dict[str, float] = {}
         self.tick: dict[str, float] = {}   # sym → price tickSize (Algo API precision)
+        self.onboard: dict[str, int] = {}  # sym → listing date ms (new-coin policy)
         self._rate_ts   = 0.0
         self._rate_lock = threading.Lock()
         self._time_offset = 0.0   # ms: Binance server time - local time
@@ -321,6 +322,9 @@ class Client:
                     self.step[s['symbol']] = float(f['stepSize'])
                 elif f['filterType'] == 'PRICE_FILTER':
                     self.tick[s['symbol']] = float(f.get('tickSize', 0) or 0)
+            ob = int(s.get('onboardDate', 0) or 0)
+            if ob:
+                self.onboard[s['symbol']] = ob
 
     def round_price(self, sym: str, px: float) -> str:
         """Snap a price to the symbol's tick size — the Algo API rejects
@@ -487,6 +491,7 @@ class AlphaBot:
         self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
         self._recently_closed: dict[str, float] = {}   # sym → close ts (reconcile ghost guard)
         self._sym_cooldown: dict[str, float] = {}      # sym → ts until re-entry allowed after SL
+        self._sym_loss_streak: dict[str, int] = {}     # sym → consecutive losses (new-coin bench)
         self.wallet_curve: list = []                   # [[ts, balance]] reconstructed from Binance day 1
         self.wallet_start: float = 0.0                 # true starting capital (from income history)
         self._curve_ts: float = 0.0                    # last curve rebuild
@@ -568,6 +573,26 @@ class AlphaBot:
             log.warning(f"[STATE  ] Position save error: {e}")
 
     # ── Exchange order guards (SL + TP1 placed as real orders) ───────────────
+    def _clamp_sl_roi(self, direction: str, entry: float, lev: int, exits: dict) -> dict:
+        """Cap the stop so the worst case is SL_MAX_ROI percent ROI (user: 7%).
+        ATR stops stay when tighter; wide ones are pulled in."""
+        cap = getattr(config, 'SL_MAX_ROI', 7.0)
+        if not entry or not lev:
+            return exits
+        max_move = (cap / lev) / 100.0                     # price fraction
+        sign = 1 if direction == 'long' else -1
+        sl_cap = entry * (1 - sign * max_move)
+        if sign * (exits['sl'] - sl_cap) < 0:              # ATR stop wider than cap
+            exits = dict(exits)
+            exits['sl'] = round(sl_cap, 10)
+        return exits
+
+    def _is_new_coin(self, sym: str) -> bool:
+        ob = self.client.onboard.get(sym, 0)
+        if not ob:
+            return False
+        return (time.time() * 1000 - ob) < getattr(config, 'NEW_COIN_DAYS', 14) * 86400_000
+
     def _place_exchange_guards(self, sym: str, pos: dict):
         """Place SL + TP1 conditional orders on the exchange (Algo Order API).
         These live on Binance's servers — the position stays protected even if
@@ -1314,15 +1339,15 @@ class AlphaBot:
             log.warning(f"[WALLET ] curve build failed: {e}")
 
     # ══ BTC-ONLY PURE-CHART MODE ═══════════════════════════════════════════════
-    def btc_chart_read(self) -> dict | None:
-        """Pure price-action read of BTCUSDT across 1m/5m/15m/1h.
+    def btc_chart_read(self, sym: str = 'BTCUSDT') -> dict | None:
+        """Pure price-action read across 1m/5m/15m/1h.
         Each timeframe votes: price vs EMA20 (±1), market structure HH/HL vs
         LH/LL (±1), last closed candle color (±0.5). Weighted total decides
         direction; 1h carries the most weight (trend), 1m the least (trigger)."""
         votes, candles = {}, {}
         try:
             for tf, n in (('1m', 60), ('5m', 60), ('15m', 60), ('1h', 60)):
-                raw    = self.client.klines('BTCUSDT', tf, n)
+                raw    = self.client.klines(sym, tf, n)
                 closes = [float(k[4]) for k in raw]
                 px     = closes[-1]
                 ema20  = float(pd.Series(closes).ewm(span=20, adjust=False).mean().iloc[-1])
@@ -1346,10 +1371,17 @@ class AlphaBot:
         r5  = candles['5m']
         atr = sum(float(k[2]) - float(k[3]) for k in r5[-14:]) / 14
         px  = float(r5[-1][4])
-        return {'votes': votes, 'score': round(total, 2),
+        # entry-location metrics (anti top-of-candle entries)
+        k15 = candles['15m'][-1]                      # forming 15m candle
+        h15, l15 = float(k15[2]), float(k15[3])
+        c15_pos  = (px - l15) / (h15 - l15) if h15 > l15 else 0.5   # 0=low 1=high
+        c5s      = [float(k[4]) for k in r5]
+        ema20_5  = float(pd.Series(c5s).ewm(span=20, adjust=False).mean().iloc[-1])
+        ema_dist = (px - ema20_5) / ema20_5 * 100 if ema20_5 else 0.0
+        return {'symbol': sym, 'votes': votes, 'score': round(total, 2),
                 'direction': 'long' if total > 0 else 'short',
                 'atr': atr, 'atr_pct': round(atr / px * 100, 3) if px else 0.2,
-                'price': px}
+                'price': px, 'c15_pos': round(c15_pos, 2), 'ema_dist': round(ema_dist, 3)}
 
     async def btc_chart_loop(self, boot: bool = True):
         """Dedicated BTC chart loop: read 1m/5m/15m/1h, take the direction,
@@ -1377,17 +1409,30 @@ class AlphaBot:
             try:
                 self.check_daily()
                 if boot:   # solo mode owns the progress bar; scanner owns it in dual mode
-                    self.scan_progress = {'done': 1, 'total': 1, 'sym': 'BTCUSDT'}
-                r = await asyncio.get_event_loop().run_in_executor(None, self.btc_chart_read)
-                if r:
+                    self.scan_progress = {'done': 1, 'total': 1, 'sym': 'CHARTS'}
+                for _cs in getattr(config, 'CHART_SYMBOLS', ['BTCUSDT']):
+                    r = await asyncio.get_event_loop().run_in_executor(None, self.btc_chart_read, _cs)
+                    if not r:
+                        continue
                     strong = abs(r['score']) >= config.BTC_CHART_MIN_SCORE
                     # 1h and 15m must agree with the trade direction (trend TFs)
                     aligned = (r['votes']['1h'] > 0 and r['votes']['15m'] > 0) if r['direction'] == 'long' \
                               else (r['votes']['1h'] < 0 and r['votes']['15m'] < 0)
-                    self.emit('pass' if (strong and aligned) else 'info',
-                        f"📊 BTC {arrows(r['votes'])} | score {r['score']:+.2f} "
-                        f"→ {r['direction'].upper()} {'✓' if (strong and aligned) else '· waiting'}")
-                    if strong and aligned and 'BTCUSDT' not in self.positions:
+                    # ENTRY LOCATION: never buy the top of the 15m candle — wait
+                    # for a pullback into the lower 60% (mirror for shorts), and
+                    # never chase price >0.35% beyond the 5m EMA20.
+                    if r['direction'] == 'long':
+                        located = r['c15_pos'] <= 0.60 and r['ema_dist'] <= 0.35
+                    else:
+                        located = r['c15_pos'] >= 0.40 and r['ema_dist'] >= -0.35
+                    ok  = strong and aligned and located
+                    tag = 'OK' if ok else ('extended — wait for pullback' if (strong and aligned) else 'waiting')
+                    _ar = ' '.join(f"{tf}:{'U' if r['votes'][tf] > 0 else 'D'}" for tf in ('1m','5m','15m','1h'))
+                    self.emit('pass' if ok else 'info',
+                        f"📊 {_cs.replace('USDT','')} {_ar} | score {r['score']:+.2f} "
+                        f"| c15 {r['c15_pos']:.2f} ema {r['ema_dist']:+.2f}% "
+                        f"→ {r['direction'].upper()} · {tag}")
+                    if ok and _cs not in self.positions:
                         await self.open_btc_chart_position(r)
                 await self.push()
             except Exception as e:
@@ -1397,7 +1442,7 @@ class AlphaBot:
     async def open_btc_chart_position(self, r: dict):
         """Slim chart-mode entry: no alt gates — the chart read IS the signal.
         Reuses the same sizing, exits, and guard mechanics as the main path."""
-        sym = 'BTCUSDT'
+        sym = r.get('symbol', 'BTCUSDT')
         if sym in self.positions or not self.guards_ok(): return
         if time.time() < self._sym_cooldown.get(sym, 0): return
         direction = r['direction']
@@ -1432,6 +1477,7 @@ class AlphaBot:
 
         entry = float(resp.get('avgPrice') or venue_px) or venue_px
         exits = self.compute_exits(direction, entry, atr, sym)
+        exits = self._clamp_sl_roi(direction, entry, lev, exits)
         self.positions[sym] = {
             'symbol': sym, 'direction': direction, 'entry': entry, 'current': entry,
             'peak': entry, 'runner': False, 'qty': qty,
@@ -1463,8 +1509,8 @@ class AlphaBot:
     async def open_position(self, a: dict):
         sym = a['symbol']
         if sym in self.positions: return
-        if getattr(config, 'BTC_ONLY_MODE', False) and sym == 'BTCUSDT':
-            return   # the pure-chart loop owns BTC — scanner trades alts only
+        if getattr(config, 'BTC_ONLY_MODE', False) and sym in getattr(config, 'CHART_SYMBOLS', ['BTCUSDT']):
+            return   # the pure-chart loop owns these — scanner trades other alts
         if not self.guards_ok(): return
         if time.time() < self._sym_cooldown.get(sym, 0):
             return   # stopped out recently — no revenge re-entry on the same coin
@@ -1541,6 +1587,13 @@ class AlphaBot:
             (direction == 'long'  and (a['rsi'] <= 30 or (_pats & BULL_REVERSAL))) or
             (direction == 'short' and (a['rsi'] >= 70 or (_pats & BEAR_REVERSAL)))
         )
+
+        # ── ALTS NEED NUMBERS *AND* CHARTS: the coin's own 4h + 1d trend must
+        # agree with the trade (runners = capitulation reversals are exempt —
+        # they are counter-trend by definition).
+        if not htf_aligned and not is_runner:
+            self.emit('fail', f"{sym} HTF chart not aligned (4h:{'↑' if a.get('h4_bull') else '↓'} "
+                              f"1d:{'↑' if a.get('d1_bull') else '↓'}) → SKIP"); return
 
         # ── TREND-STRENGTH gate: no real trend (ADX below threshold) → no trade
         adx = a.get('adx', 0) or 0
@@ -1836,6 +1889,10 @@ class AlphaBot:
         # Conservative alt sizing: alts risk a fraction of the BTC risk budget
         if sym != 'BTCUSDT':
             risk_pct *= getattr(config, 'ALT_RISK_FACTOR', 1.0)
+        # New listings are lottery tickets: cap risk at NEW_COIN_RISK_PCT of wallet
+        if self._is_new_coin(sym):
+            risk_pct = min(risk_pct, getattr(config, 'NEW_COIN_RISK_PCT', 2.0) / 100)
+            self.emit('info', f"{sym} NEW LISTING — risk capped at {getattr(config,'NEW_COIN_RISK_PCT',2.0):.0f}% of wallet")
 
         price    = a['price']
         sl_pct   = sl_dist / price if price else 0.01     # stop distance fraction
@@ -1869,6 +1926,7 @@ class AlphaBot:
 
         entry = float(resp.get('avgPrice') or price) or price
         exits = self.compute_exits(direction, entry, a['atr'], sym)
+        exits = self._clamp_sl_roi(direction, entry, lev, exits)
 
         self.positions[sym] = {
             'symbol':    sym,
@@ -1998,10 +2056,18 @@ class AlphaBot:
                     _roi1, _sc1, _roi2 = config.RUNNER_TP_ROI_1, config.RUNNER_TP_ROI_1_SCALE, config.RUNNER_TP_ROI_2
                 else:
                     _roi1, _sc1, _roi2 = config.TAKE_PROFIT_ROI_1, config.TAKE_PROFIT_ROI_1_SCALE, config.TAKE_PROFIT_ROI_2
+                # SCALP = FULL profit take at the first target (SCALE >= 1)
+                if not pos.get('runner') and _sc1 >= 0.999 and pnl_pct >= _roi1:
+                    await self.close(sym, pos, pnl_pct, f"+{_roi1:.0f}% ROI FULL TP")
+                    continue
+                # HARD ROI STOP: no trade may lose more than SL_MAX_ROI percent
+                if pnl_pct <= -getattr(config, 'SL_MAX_ROI', 7.0):
+                    await self.close(sym, pos, pnl_pct, f"-{getattr(config,'SL_MAX_ROI',7.0):.0f}% ROI STOP")
+                    continue
                 if pnl_pct >= _roi2 and pos.get('roi_banked'):
                     await self.close(sym, pos, pnl_pct, f"+{_roi2:.0f}% ROI TP")
                     continue
-                if pnl_pct >= _roi1 and not pos.get('roi_banked'):
+                if _sc1 < 0.999 and pnl_pct >= _roi1 and not pos.get('roi_banked'):
                     pos['roi_banked'] = True
                     pos['tp1_hit']    = True     # engage peak-ratchet protection on runner
                     pos['be_locked']  = True
@@ -2216,6 +2282,12 @@ class AlphaBot:
         # Re-entry cooldown: SL_COOLDOWN_MIN after a loss, 5 min after any win —
         # stops revenge re-entry / churn back into the same coin.
         self._sym_cooldown[sym] = time.time() + (config.SL_COOLDOWN_MIN * 60 if not is_win else 300)
+        # New-coin 2-strike rule: consecutive losses on a fresh listing = bench 24h
+        self._sym_loss_streak[sym] = 0 if is_win else self._sym_loss_streak.get(sym, 0) + 1
+        if (not is_win and self._is_new_coin(sym)
+                and self._sym_loss_streak[sym] >= getattr(config, 'NEW_COIN_MAX_LOSSES', 2)):
+            self._sym_cooldown[sym] = time.time() + 86400
+            self.emit('warn', f"🚫 {sym} new listing hit {self._sym_loss_streak[sym]} straight losses — benched 24h")
         # A slot just freed — give queued (slot-blocked) signals a fresh shot
         if self._blocked_signals:
             asyncio.get_event_loop().create_task(self._retry_blocked())
