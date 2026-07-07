@@ -36,7 +36,7 @@
   .poscard { border:1px solid rgba(0,255,204,0.08); padding:12px 14px; position:relative; animation:fade-up 0.5s ease; }
   .poscard:hover { background:rgba(0,255,204,0.03); }
 
-  .sigcard { flex-shrink:0; width:190px; height:70px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; animation:sig-in 0.45s ease-out; position:relative; overflow:hidden; }
+  .sigcard { flex-shrink:0; width:190px; height:70px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between; position:relative; overflow:hidden; }
 
   .tradecell { padding:8px 12px; border-right:1px solid rgba(255,0,128,0.05); transition:background 0.15s; overflow:hidden; }
   .tradecell:hover { background:rgba(255,0,128,0.04); }
@@ -145,7 +145,7 @@
       <span style="color:#00ffcc; font-size:8px; font-weight:700; letter-spacing:0.2em; text-align:center; line-height:1.3">SIGNAL<br>FEED</span>
       <span class="mono" style="color:#1a1a3a; font-size:8px" id="feed-scan">#0</span>
     </div>
-    <div style="flex:1; overflow:hidden; display:flex; align-items:center; padding:0 8px; gap:6px" id="sig-cards"></div>
+    <div style="flex:1; overflow-x:auto; overflow-y:hidden; display:flex; align-items:center; padding:0 8px; gap:6px; scrollbar-width:thin" id="sig-cards"></div>
     <div style="width:80px; flex-shrink:0; border-left:1px solid rgba(0,255,204,0.07); display:flex; flex-direction:column; justify-content:center; gap:8px; padding:0 12px; background:rgba(0,255,204,0.01)">
       <div><div class="lbl" style="font-size:7px">SIGNALS</div><div class="bebas" style="color:#00ffcc; font-size:16px; line-height:1" id="cnt-sig">0</div></div>
       <div><div class="lbl" style="font-size:7px">FILTERS</div><div class="bebas" style="color:#f59e0b; font-size:16px; line-height:1" id="cnt-fil">0</div></div>
@@ -163,7 +163,7 @@
       <span style="color:#1a1a3a" id="tr-pf">PF —</span>
       <span style="color:#1a1a3a" id="tr-avg">AvgW — / AvgL —</span>
     </div>
-    <div style="display:grid; grid-template-columns:repeat(6,1fr); height:calc(100% - 24px)" id="trade-grid"></div>
+    <div style="display:grid; grid-template-columns:repeat(6,1fr); grid-auto-rows:min-content; height:calc(100% - 24px); overflow-y:auto; scrollbar-width:thin" id="trade-grid"></div>
   </div>
 
   <!-- ══ FOOTER ══ -->
@@ -207,6 +207,17 @@ setInterval(() => {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws = null;
+// Only rewrite a panel when its content actually changed — kills the blinking
+// caused by rebuilding every DOM node on every push, and preserves scroll.
+function setHTML(id, html) {
+  const el = $(id);
+  if (!el || el.__h === html) return;
+  const st = el.scrollTop;
+  el.__h = html; el.innerHTML = html;
+  el.scrollTop = st;
+}
+let _lastRender = 0;
+
 function connect() {
   ws = new WebSocket('ws://localhost:8765');
   ws.onopen = () => {
@@ -217,7 +228,11 @@ function connect() {
   ws.onmessage = ev => {
     try {
       const d = JSON.parse(ev.data);
-      if (d.type === 'state') { S = d; onState(); }
+      if (d.type === 'state') {
+        S = d;
+        const now = Date.now();
+        if (now - _lastRender > 900) { _lastRender = now; onState(); }
+      }
     } catch(e) {}
   };
   ws.onclose = () => {
@@ -297,10 +312,10 @@ function renderPositions() {
   Object.keys(posHist).forEach(s => { if (!seen.has(s)) delete posHist[s]; });
 
   if (!ps.length) {
-    $('pos-list').innerHTML = '<div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions — scanning…</div>';
+    setHTML('pos-list', '<div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions — scanning…</div>');
     return;
   }
-  $('pos-list').innerHTML = ps.map(p => {
+  setHTML('pos-list', ps.map(p => {
     const c = pnlCol(p.pnl_pct||0), dc = p.direction==='long'?TEAL:PINK;
     return `<div class="poscard" style="border-top:2px solid ${c}">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:8px">
@@ -326,7 +341,7 @@ function renderPositions() {
         <span style="color:#4a4a7a">${fprice(p.current)}</span>
       </div>
     </div>`;
-  }).join('');
+  }).join(''));
 }
 
 function renderGauges() {
@@ -337,14 +352,14 @@ function renderGauges() {
     { label:'DRAWDOWN', val:dd.toFixed(1)+'%',   w:Math.min(100,dd*3),          color:PINK },
     { label:'BTC RSI',  val:Math.round(S.btc_rsi||50), w:S.btc_rsi||50,         color:VIOLET },
   ];
-  $('gauges').innerHTML = bars.map(g => `
+  setHTML('gauges', bars.map(g => `
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px">
       <span style="color:#2a2a4a; font-size:8px; width:62px; flex-shrink:0; letter-spacing:0.05em">${g.label}</span>
       <div style="flex:1; height:3px; background:rgba(255,255,255,0.04)">
         <div style="height:100%; background:${g.color}; transition:width 1s ease; box-shadow:0 0 5px ${g.color}; width:${g.w}%"></div>
       </div>
       <span class="mono" style="color:${g.color}; font-size:9px; font-weight:600; width:30px; text-align:right; flex-shrink:0">${g.val}</span>
-    </div>`).join('');
+    </div>`).join(''));
 }
 
 function trendSpan(t, isBool) {
@@ -379,7 +394,7 @@ function renderSignals() {
   $('cnt-fil').textContent = logs.filter(l=>l.type==='fail').length;
   $('cnt-alr').textContent = logs.filter(l=>l.type==='warn'||l.type==='exit').length;
 
-  const cards = logs.slice(0, 7).map(l => {
+  const cards = logs.slice(0, 40).map(l => {
     const m = LOG_MAP[l.type] || LOG_MAP.info;
     const msg = l.msg || '';
     const symMatch = msg.match(/\b([A-Z0-9]{2,20}USDT)\b/);
@@ -405,7 +420,7 @@ function renderSignals() {
       </div>
       <div>
         <div style="height:3px; background:rgba(255,255,255,0.05); overflow:hidden">
-          <div style="height:100%; background:${m.c}; width:${strength*10}%; animation:strength-fill 0.8s ease-out; box-shadow:0 0 6px ${m.c}; opacity:0.85"></div>
+          <div style="height:100%; background:${m.c}; width:${strength*10}%; box-shadow:0 0 6px ${m.c}; opacity:0.85"></div>
         </div>
         <div style="display:flex; justify-content:space-between; margin-top:3px">
           <span class="mono" style="color:#1a1a3a; font-size:7.5px" title="${msg.replace(/"/g,'&quot;')}">${shortMsg}</span>
@@ -414,11 +429,11 @@ function renderSignals() {
       </div>
     </div>`;
   });
-  $('sig-cards').innerHTML = cards.join('');
+  setHTML('sig-cards', cards.join(''));
 }
 
 function renderTrades() {
-  const trades = (S.trades || []).slice(-6).reverse();
+  const trades = (S.trades || []).slice(-24).reverse();
   $('tr-wl').textContent = `${S.wins||0}W / ${S.losses||0}L`;
   $('tr-wr').textContent = `WR ${S.win_rate||0}%`;
   const tt = $('tr-total'); tt.textContent = `Total ${fsign(S.total_pnl)}$`; tt.style.color = pnlCol(S.total_pnl);
@@ -429,7 +444,7 @@ function renderTrades() {
   $('tr-pf').textContent = `PF ${pf}`;
   $('tr-avg').textContent = `AvgW ${fsign(S.avg_win||0)}% / AvgL ${fsign(S.avg_loss||0)}%`;
 
-  $('trade-grid').innerHTML = trades.map(t => {
+  setHTML('trade-grid', trades.map(t => {
     const rc = t.is_win ? TEAL : PINK;
     const dc = t.direction==='long' ? TEAL : PINK;
     return `<div class="tradecell" style="border-top:2px solid ${rc}">
@@ -442,7 +457,7 @@ function renderTrades() {
       <div style="color:${rc}; font-size:7.5px; font-weight:700; letter-spacing:0.1em">${t.is_win?'WIN':'LOSS'} · ${(t.reason||'').slice(0,14)}</div>
       <div class="mono" style="color:#1a1a3a; font-size:8px; margin-top:1px">${fsign(t.pnl_usd)}$</div>
     </div>`;
-  }).join('') || '<div style="grid-column:1/-1; color:#1a1a3a; font-size:10px; text-align:center; align-self:center">No closed trades yet</div>';
+  }).join('') || '<div style="grid-column:1/-1; color:#1a1a3a; font-size:10px; text-align:center; align-self:center">No closed trades yet</div>');
 }
 
 function renderFooter() {

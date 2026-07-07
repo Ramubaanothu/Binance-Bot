@@ -75,7 +75,8 @@ WS_URL      = 'ws://localhost:8766' if POLY_MODE else 'ws://localhost:8765'
 BOT_SCRIPT  = 'poly_bot.py'         if POLY_MODE else 'bot.py'
 BROWSER_URL = 'http://localhost:8080/poly_terminal.html' if POLY_MODE \
               else pathlib.Path(__file__).with_name('atlas.html').as_uri()
-REFRESH_HZ  = 6       # screen updates per second
+REFRESH_HZ  = 2       # screen updates per second (6 Hz full redraws made
+                      # Windows conhost flicker/blink — 2 Hz is smooth)
 BOT_LABEL   = 'PolyAlphaBot' if POLY_MODE else 'AlphaBot'
 
 # ─── Spinner frames ───────────────────────────────────────────────────────────

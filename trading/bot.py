@@ -1271,15 +1271,33 @@ class AlphaBot:
                 'atr': atr, 'atr_pct': round(atr / px * 100, 3) if px else 0.2,
                 'price': px}
 
-    async def btc_chart_loop(self):
-        """Dedicated BTC-only loop: read the charts, take the direction, manage
-        via the normal exit engine. Altcoin scanner is paused in this mode."""
-        self.emit('info', '📊 BTC PURE-CHART MODE — alt scanner paused; reading 1m/5m/15m/1h')
+    async def btc_chart_loop(self, boot: bool = True):
+        """Dedicated BTC chart loop: read 1m/5m/15m/1h, take the direction,
+        manage via the normal exit engine. Runs alone (boot=True) or alongside
+        the alt scanner (boot=False — scan_loop already did the boot)."""
+        self.emit('info', '📊 BTC PURE-CHART loop — reading 1m/5m/15m/1h')
+
+        if boot:
+            # Boot sequence (normally done by scan_loop): precisions, balance, reconcile
+            try:
+                self.client.load_symbols()
+                self.emit('info', f'📐 {len(self.client.step)} symbol precisions loaded')
+            except Exception as e:
+                self.emit('warn', f"Precision load: {e}")
+            self.balance     = self.client.usdt_balance(self.paper_balance)
+            self.start_bal   = self.balance
+            self.peak_bal    = self.balance
+            self.daily_start = self.balance
+            self.emit('info', f"💰 {'📄 PAPER' if config.PAPER_MODE else '🔴 LIVE'} MODE | Balance: ${self.balance:.4f} USDT")
+            await self._reconcile_positions()
+        else:
+            await asyncio.sleep(20)   # let scan_loop finish its boot first
         arrows = lambda v: ' '.join(f"{tf}:{'↑' if v[tf] > 0 else '↓'}" for tf in ('1m', '5m', '15m', '1h'))
         while self.running:
             try:
                 self.check_daily()
-                self.scan_progress = {'done': 1, 'total': 1, 'sym': 'BTCUSDT'}
+                if boot:   # solo mode owns the progress bar; scanner owns it in dual mode
+                    self.scan_progress = {'done': 1, 'total': 1, 'sym': 'BTCUSDT'}
                 r = await asyncio.get_event_loop().run_in_executor(None, self.btc_chart_read)
                 if r:
                     strong = abs(r['score']) >= config.BTC_CHART_MIN_SCORE
@@ -1365,6 +1383,8 @@ class AlphaBot:
     async def open_position(self, a: dict):
         sym = a['symbol']
         if sym in self.positions: return
+        if getattr(config, 'BTC_ONLY_MODE', False) and sym == 'BTCUSDT':
+            return   # the pure-chart loop owns BTC — scanner trades alts only
         if not self.guards_ok(): return
         if time.time() < self._sym_cooldown.get(sym, 0):
             return   # stopped out recently — no revenge re-entry on the same coin
@@ -1733,6 +1753,9 @@ class AlphaBot:
         elif conf >= 60: risk_pct *= 1.2
         elif conf < 54:  risk_pct *= 0.75
         if is_major:     risk_pct *= 1.25   # cleaner fills, deeper books
+        # Conservative alt sizing: alts risk a fraction of the BTC risk budget
+        if sym != 'BTCUSDT':
+            risk_pct *= getattr(config, 'ALT_RISK_FACTOR', 1.0)
 
         price    = a['price']
         sl_pct   = sl_dist / price if price else 0.01     # stop distance fraction
@@ -2572,9 +2595,15 @@ class AlphaBot:
         print(dash)
         print("  Open: terminal.html in Chrome")
         print(sep)
-        # Run scan loop; server runs in background as long as event loop is alive
-        if getattr(config, 'BTC_ONLY_MODE', False):
-            await self.btc_chart_loop()     # pure-chart BTC mode — alt scanner paused
+        # Run trading loops; server runs in background as long as event loop is alive
+        if getattr(config, 'BTC_ONLY_MODE', False) and getattr(config, 'ALT_TRADING', False):
+            # DUAL MODE: BTC pure-chart loop + conservative alt scanner in parallel.
+            # scan_loop performs the boot (precisions/balance/reconcile); the chart
+            # loop skips its own boot to avoid doing it twice.
+            asyncio.get_event_loop().create_task(self.btc_chart_loop(boot=False))
+            await self.scan_loop()
+        elif getattr(config, 'BTC_ONLY_MODE', False):
+            await self.btc_chart_loop()     # pure-chart BTC only — alt scanner paused
         else:
             await self.scan_loop()
 
