@@ -64,6 +64,7 @@ class Client:
         self.sess   = requests.Session()
         self.sess.headers['X-MBX-APIKEY'] = self.key
         self.step: dict[str, float] = {}
+        self.tick: dict[str, float] = {}   # sym → price tickSize (Algo API precision)
         self._rate_ts   = 0.0
         self._rate_lock = threading.Lock()
         self._time_offset = 0.0   # ms: Binance server time - local time
@@ -202,7 +203,7 @@ class Client:
             'symbol':        sym, 'side': side,
             'algoType':      'CONDITIONAL',
             'type':          'STOP_MARKET',
-            'triggerPrice':  f"{stop_price:.8f}".rstrip('0').rstrip('.'),
+            'triggerPrice':  self.round_price(sym, stop_price),
             'closePosition': 'true',
             'workingType':   'MARK_PRICE',   # index-based — immune to stop hunts
         }
@@ -219,7 +220,7 @@ class Client:
             'algoType':     'CONDITIONAL',
             'type':         'TAKE_PROFIT_MARKET',
             'quantity':     self._fmt_qty(qty),
-            'triggerPrice': f"{stop_price:.8f}".rstrip('0').rstrip('.'),
+            'triggerPrice': self.round_price(sym, stop_price),
             'reduceOnly':   'true',
             'workingType':  'MARK_PRICE',
         }
@@ -318,6 +319,18 @@ class Client:
             for f in s.get('filters', []):
                 if f['filterType'] == 'LOT_SIZE':
                     self.step[s['symbol']] = float(f['stepSize'])
+                elif f['filterType'] == 'PRICE_FILTER':
+                    self.tick[s['symbol']] = float(f.get('tickSize', 0) or 0)
+
+    def round_price(self, sym: str, px: float) -> str:
+        """Snap a price to the symbol's tick size — the Algo API rejects
+        excess precision with -1111 (the legacy endpoint tolerated it)."""
+        tick = self.tick.get(sym, 0.0)
+        if tick > 0:
+            px = round(round(px / tick) * tick, 12)
+            dec = max(0, f'{tick:.12f}'.rstrip('0')[::-1].find('.'))
+            return f'{px:.{dec}f}'
+        return f'{px:.8f}'.rstrip('0').rstrip('.')
 
     def round_qty(self, sym: str, qty: float) -> float:
         step = self.step.get(sym, 0.001)
