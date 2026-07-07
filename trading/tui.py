@@ -350,7 +350,11 @@ def _header(S: dict) -> Panel:
     r2.append(trend4h, style=f'bold {tcol(trend4h)}')
     r2.append('   DAILY: ', style=FAINT)
     r2.append('BULL' if daily_bull else 'BEAR', style=f'bold {TEAL if daily_bull else PINK}')
-    r2.append('   BTC 10m: ', style=FAINT)
+    _btcpx = S.get('btc_price', 0) or 0
+    if _btcpx:
+        r2.append('   BTC ', style=FAINT)
+        r2.append(f'${_btcpx:,.0f}', style='bold #f7c948')
+    r2.append('  10m: ', style=FAINT)
     r2.append(f'{btc5m:+.2f}%', style=f'bold {_pcol(btc5m)}')
     r2.append('   RSI ', style=FAINT)
     r2.append_text(rsi_bar(rsi, 16))
@@ -566,15 +570,7 @@ def _scanner(S: dict, frame: int) -> Panel:
             body.append(f'{prog.get("sym","")}\n', style=FAINT)
         else:
             body.append('waiting for scan…\n', style=FAINT)
-        body.append('  ', style='')
-        body.append(f'{pass_n}', style=f'bold {TEAL}')
-        body.append(' sig  ', style=FAINT)
-        body.append(f'{fail_n}', style=f'bold {AMBER}')
-        body.append(' fil  ', style=FAINT)
-        body.append(f'{exec_n}', style=f'bold {TEAL}')
-        body.append(' exec  ', style=FAINT)
-        body.append(f'{exit_n}', style=f'bold {PINK}')
-        body.append(' exit\n\n', style=FAINT)
+        body.append('\n')   # counts live in the panel title — no duplicate row
     else:
         body.append('  ✗ OFFLINE — waiting for bot...\n\n', style=f'bold {PINK}')
 
@@ -921,52 +917,81 @@ def _area_chart(vals, w, h, start_val, ts=None):
     return rows, lo, hi
 
 
+def _braille_line(vals, w_cells, h_cells, start_val):
+    """Smooth connected LINE chart in Braille (2×4 sub-dots per cell) —
+    24 vertical levels at 6 rows, columns joined so the line never breaks.
+    Teal above starting capital, pink below."""
+    DOT = ((0x01, 0x08), (0x02, 0x10), (0x04, 0x20), (0x40, 0x80))
+    DW, DH = w_cells * 2, h_cells * 4
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    n = len(vals)
+    idx = [min(n - 1, int(i * n / DW)) for i in range(DW)]
+    ys  = [int((vals[i] - lo) / rng * (DH - 1)) for i in idx]
+    vs  = [vals[i] for i in idx]
+    bits, colv = {}, {}
+    for x in range(DW):
+        lo_y, hi_y = (ys[x], ys[x]) if x == 0 else (min(ys[x-1], ys[x]), max(ys[x-1], ys[x]))
+        for yy in range(lo_y, hi_y + 1):
+            cell = ((DH - 1 - yy) // 4, x // 2)
+            bits[cell] = bits.get(cell, 0) | DOT[(DH - 1 - yy) % 4][x % 2]
+            colv.setdefault(cell, vs[x])
+    rows = []
+    for r in range(h_cells):
+        t = Text()
+        for c in range(w_cells):
+            b = bits.get((r, c), 0)
+            if b:
+                t.append(chr(0x2800 + b),
+                         style=f"bold {TEAL if colv.get((r, c), start_val) >= start_val else PINK}")
+            else:
+                t.append(' ')
+        rows.append(t)
+    return rows, lo, hi
+
+
 def _balance_chart(S: dict) -> Panel:
     global _bal_last_ts, _bal_save_ts
     bal  = S.get('balance', 0.0)
-    dpnl = S.get('daily_pnl', 0.0)
-    tpnl = S.get('total_pnl', 0.0)
+    now  = time.time()
 
-    now = time.time()
-    if bal > 0:
-        last_val = _balance_history[-1][1] if _balance_history else 0.0
-        # Record steadily — keep the FULL wallet history including drawdowns
-        # (no clearing). One point per ~60s or on any real balance change.
-        if now - _bal_last_ts >= 60 or (last_val and abs(bal - last_val) >= 0.01):
-            _balance_history.append((now, bal))
-            _bal_last_ts = now
-            if now - _bal_save_ts >= 30:
-                _save_balance_history()
-                _bal_save_ts = now
+    # ── Source of truth: Binance day-1 wallet curve (income history). Local
+    # recording stays only as a fallback for paper mode / missing curve.
+    curve = S.get('wallet_curve') or []
+    if len(curve) > 2:
+        pts = [(float(t), float(v)) for t, v in curve]
+        if bal > 0:
+            pts.append((now, bal))                      # live point
+        start_cap = S.get('wallet_start') or pts[0][1]
+        src_tag   = 'Binance day-1'
+    else:
+        if bal > 0:
+            last_val = _balance_history[-1][1] if _balance_history else 0.0
+            if now - _bal_last_ts >= 60 or (last_val and abs(bal - last_val) >= 0.01):
+                _balance_history.append((now, bal))
+                _bal_last_ts = now
+                if now - _bal_save_ts >= 30:
+                    _save_balance_history(); _bal_save_ts = now
+        pts = list(_balance_history)
+        start_cap = (bal - S.get('total_pnl', 0.0)) or (pts[0][1] if pts else bal)
+        src_tag   = 'local session'
 
-    vals   = [v for _, v in _balance_history]
+    vals   = [v for _, v in pts]
     n      = len(vals)
-    span_s = (now - _balance_history[0][0]) if _balance_history else 0
-    mins   = int(span_s / 60)
-    # All-time % from the true wallet start = current balance − cumulative P&L
-    # (matches the header TOTAL), not the first charted point.
-    start_cap = (bal - tpnl) if (bal - tpnl) > 0 else (vals[0] if vals else bal)
+    span_s = (now - pts[0][0]) if pts else 0
     ses_pct = (bal - start_cap) / start_cap * 100 if start_cap else 0.0
-    ses_col  = _pcol(ses_pct)
-    dpnl_col = _pcol(dpnl)
-    tpnl_col = _pcol(tpnl)
 
-    # Human-readable span of the whole wallet history
     if   span_s >= 86400: span_txt = f'{span_s/86400:.1f}d'
     elif span_s >= 3600:  span_txt = f'{span_s/3600:.1f}h'
-    else:                 span_txt = f'{mins}min'
+    else:                 span_txt = f'{int(span_s/60)}min'
 
-    # Stats line always shown at top
+    # Stats line — no DAY/TOTAL here (already in the header; duplicates removed)
     stats = Text()
     stats.append('  $', style=f'bold {TEAL}')
-    stats.append(f'{bal:,.2f}  ', style='bold #e8e8ff')
-    stats.append('DAY ', style=FAINT)
-    stats.append(f'{dpnl:+,.2f}  ', style=f'bold {dpnl_col}')
-    stats.append('TOTAL ', style=FAINT)
-    stats.append(f'{tpnl:+,.2f}  ', style=f'bold {tpnl_col}')
+    stats.append(f'{bal:,.2f}   ', style='bold #e8e8ff')
     stats.append('ALL-TIME ', style=FAINT)
-    stats.append(f'{ses_pct:+.2f}%  ', style=f'bold {ses_col}')
-    stats.append(f'[{n}pts / {span_txt} wallet history]\n', style=FAINT)
+    stats.append(f'{ses_pct:+.2f}%   ', style=f'bold {_pcol(ses_pct)}')
+    stats.append(f'[{n}pts · {span_txt} · {src_tag}]\n', style=FAINT)
 
     if n < 3:
         stats.append('\n  Collecting balance history — line chart appears after ~60 seconds\n', style=FAINT)
@@ -975,11 +1000,15 @@ def _balance_chart(S: dict) -> Panel:
 
     start_val = start_cap   # teal above starting capital, pink below (honest)
     CHART_H = 6
-    CHART_W = 110
+    # FULL width: use the whole terminal minus the y-axis labels
+    try:
+        term_w = os.get_terminal_size().columns
+    except Exception:
+        term_w = 170
+    max_lw  = len(f'${max(vals):,.0f}')
+    CHART_W = max(60, term_w - max_lw - 8)
 
-    tss = [t for t, _ in _balance_history]
-    rows, lo, hi = _area_chart(vals, CHART_W, CHART_H, start_val, ts=tss)
-    max_lw = len(f'${hi:,.0f}')
+    rows, lo, hi = _braille_line(vals, CHART_W, CHART_H, start_val)
     # y-labels spread across the rows (top=hi … bottom=lo)
     y_labels = [f'${hi - (hi-lo)*i/(CHART_H-1):,.0f}' for i in range(CHART_H)]
 

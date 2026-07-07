@@ -237,6 +237,25 @@ class Client:
         if start_ms > 0: p['startTime'] = start_ms
         return self._get('/fapi/v1/income', p, auth=True)
 
+    def income_all(self, start_ms: int = 0) -> list:
+        """FULL income history (realized P&L, commissions, funding, transfers)
+        since account day 1 — used to reconstruct the true wallet curve."""
+        out, cur = [], start_ms
+        for _ in range(30):                     # up to 30k records
+            p = {'limit': 1000}
+            if cur: p['startTime'] = cur
+            batch = self._get('/fapi/v1/income', p, auth=True)
+            if not batch: break
+            out.extend(batch)
+            if len(batch) < 1000: break
+            cur = int(batch[-1]['time']) + 1
+        return out
+
+    def wallet_balance(self) -> float:
+        """totalWalletBalance (excludes unrealized) — the equity anchor."""
+        acc = self.account()
+        return float(acc.get('totalWalletBalance', 0) or 0)
+
     def listen_key(self) -> str:
         """User-data stream key — lets Binance push account/position events to us."""
         r = self.sess.post(f"{BASE}/fapi/v1/listenKey", timeout=10)
@@ -450,6 +469,9 @@ class AlphaBot:
         self.scan_progress = {'done': 0, 'total': 0, 'sym': ''}   # live scan progress for dashboard
         self._recently_closed: dict[str, float] = {}   # sym → close ts (reconcile ghost guard)
         self._sym_cooldown: dict[str, float] = {}      # sym → ts until re-entry allowed after SL
+        self.wallet_curve: list = []                   # [[ts, balance]] reconstructed from Binance day 1
+        self.wallet_start: float = 0.0                 # true starting capital (from income history)
+        self._curve_ts: float = 0.0                    # last curve rebuild
         self.running      = True
         self.paused       = False
         self.pause_reason = ''
@@ -805,6 +827,9 @@ class AlphaBot:
             'avg_loss':     round(self.avg_loss, 4),
             'risk_per_trade': round(self.balance * config.RISK_PER_TRADE_PCT / 100, 2),
             'risk_pct':       config.RISK_PER_TRADE_PCT,
+            'btc_price':      round(self._mark_prices.get('BTCUSDT', 0.0), 2),
+            'wallet_curve':   self.wallet_curve,
+            'wallet_start':   self.wallet_start,
             'paper_mode':      config.PAPER_MODE,
             'btc_trend':       self._btc_trend,
             'btc_4h_trend':    self._btc_4h_trend,
@@ -1232,6 +1257,37 @@ class AlphaBot:
             log.error(f"[RETRY_BLOCKED] {e}")
         finally:
             self._retry_busy = False
+
+    def _build_wallet_curve(self):
+        """Reconstruct the TRUE wallet balance curve from Binance income history
+        (day 1 → now): start capital = current wallet − Σ(all income). Every
+        realized P&L / commission / funding event becomes a curve point."""
+        try:
+            wallet = self.client.wallet_balance()
+            inc    = self.client.income_all(0)
+            if not inc or wallet <= 0:
+                return
+            inc.sort(key=lambda r: int(r['time']))
+            total_income = sum(float(r.get('income', 0) or 0) for r in inc)
+            run   = wallet - total_income      # pre-history equity (usually 0 —
+            curve = []                          # the initial grant IS a TRANSFER record)
+            first_fund = None
+            for r in inc:
+                run += float(r.get('income', 0) or 0)
+                curve.append((int(r['time']) / 1000, run))
+                if first_fund is None and r.get('incomeType') == 'TRANSFER':
+                    first_fund = run            # equity right after initial funding
+            start_equity = first_fund if first_fund else (curve[0][1] if curve else wallet)
+            if len(curve) > 900:                      # downsample for transport
+                step  = len(curve) / 900
+                curve = [curve[int(i * step)] for i in range(900)] + [curve[-1]]
+            self.wallet_curve = [[round(t), round(v, 2)] for t, v in curve]
+            self.wallet_start = round(start_equity, 2)
+            self._curve_ts    = time.time()
+            log.info(f"[WALLET ] Day-1 curve from Binance: start ${start_equity:,.2f}, "
+                     f"{len(inc)} income records, now ${wallet:,.2f}")
+        except Exception as e:
+            log.warning(f"[WALLET ] curve build failed: {e}")
 
     # ══ BTC-ONLY PURE-CHART MODE ═══════════════════════════════════════════════
     def btc_chart_read(self) -> dict | None:
@@ -2168,6 +2224,8 @@ class AlphaBot:
 
         # Reconcile disk positions with exchange on every startup
         await self._reconcile_positions()
+        # True day-1 wallet curve from Binance income history
+        await asyncio.get_event_loop().run_in_executor(None, self._build_wallet_curve)
 
         try:
             tickers = self.client.tickers_24h()
@@ -2400,6 +2458,10 @@ class AlphaBot:
         prices and push to the dashboard — even while a scan is running."""
         while self.running:
             try:
+                # refresh the day-1 wallet curve every 5 min (income API)
+                if time.time() - self._curve_ts > 300:
+                    self._curve_ts = time.time()
+                    asyncio.get_event_loop().run_in_executor(None, self._build_wallet_curve)
                 if not self._upd_busy:
                     self._upd_busy = True
                     try:

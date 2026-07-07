@@ -14,7 +14,7 @@
   @keyframes ping      { 0% { transform:scale(1); opacity:1; } 70%,100% { transform:scale(2.2); opacity:0; } }
 
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:#04040a; overflow:hidden; font-family:'DM Sans',sans-serif; color:#3a3a5a; }
+  body { zoom:1.15; background:#04040a; overflow:hidden; font-family:'DM Sans',sans-serif; color:#3a3a5a; }
   ::-webkit-scrollbar { width:2px; height:2px; }
   ::-webkit-scrollbar-track { background:transparent; }
   ::-webkit-scrollbar-thumb { background:rgba(0,255,204,0.2); }
@@ -73,6 +73,7 @@
       <span id="sb-wl">0W / 0L</span>
       <span>POS <span style="color:#00ffcc; font-weight:600" id="sb-pos">0</span></span>
       <span>SCAN <span style="color:#7000ff; font-weight:600" id="sb-scan">#0</span></span>
+      <span>BTC <span style="color:#f7c948; font-weight:700" id="sb-btc">—</span></span>
     </div>
     <div style="margin-left:auto; display:flex; align-items:center; gap:10px; flex-shrink:0">
       <span style="color:#06b6d4" id="sb-session">— SESSION</span>
@@ -250,9 +251,16 @@ function onState() {
   const bal = S.balance || 0;
   startBal = S.start_bal || startBal || bal;
 
+  // Prefer the TRUE day-1 wallet curve reconstructed from Binance income
+  if (S.wallet_curve && S.wallet_curve.length > 2) {
+    balHist = S.wallet_curve.map(p => ({ t: p[0]*1000, v: p[1] }));
+    balHist.push({ t: Date.now(), v: bal });
+    if (S.wallet_start) startBal = S.wallet_start;
+  }
   // balance history: append when changed or every 10s
   const last = balHist[balHist.length-1];
-  if (!last || Math.abs(bal - last.v) > 0.005 || Date.now() - last.t > 10000) {
+  if (!(S.wallet_curve && S.wallet_curve.length > 2) &&
+      (!last || Math.abs(bal - last.v) > 0.005 || Date.now() - last.t > 10000)) {
     balHist.push({ t: Date.now(), v: bal });
     if (balHist.length > 1500) balHist = balHist.slice(-1500);
     try { localStorage.setItem('atlas_balhist', JSON.stringify(balHist)); } catch(e) {}
@@ -313,11 +321,18 @@ function renderPositions() {
 
   if (!ps.length) {
     setHTML('pos-list', '<div style="color:#1a1a3a; font-size:10px; text-align:center; padding:20px 0">No open positions — scanning…</div>');
+    $('pos-list').__key = '';
     return;
   }
-  setHTML('pos-list', ps.map(p => {
-    const c = pnlCol(p.pnl_pct||0), dc = p.direction==='long'?TEAL:PINK;
-    return `<div class="poscard" style="border-top:2px solid ${c}">
+  // Structure key: rebuild DOM only when the SET of positions changes;
+  // otherwise update fields IN PLACE — no innerHTML swap, no blinking.
+  const el  = $('pos-list');
+  const key = ps.map(p => p.symbol + p.direction + (p.phase||'')).join('|');
+  if (el.__key !== key) {
+    el.__key = key; el.__h = null;
+    el.innerHTML = ps.map(p => {
+      const c = pnlCol(p.pnl_pct||0), dc = p.direction==='long'?TEAL:PINK;
+      return `<div class="poscard" data-sym="${p.symbol}" style="border-top:2px solid ${c}">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:8px">
         <div>
           <div style="color:#c0c0e8; font-size:13px; font-weight:700; letter-spacing:0.02em">${p.symbol}</div>
@@ -329,19 +344,34 @@ function renderPositions() {
           </div>
         </div>
         <div style="text-align:right">
-          <div class="bebas" style="font-size:32px; line-height:1; color:${c}; letter-spacing:0.02em">${fsign(p.pnl_pct||0)}%</div>
-          <div style="color:${pnlCol(p.pnl_usd||0)}; font-size:12px; font-weight:600; margin-top:1px">${fsign(p.pnl_usd||0)}$</div>
+          <div class="bebas pc-pct" style="font-size:32px; line-height:1; letter-spacing:0.02em"></div>
+          <div class="pc-usd" style="font-size:12px; font-weight:600; margin-top:1px"></div>
         </div>
       </div>
       <svg viewBox="0 0 100 12" style="width:100%; height:12px; display:block; overflow:visible; margin-bottom:6px" preserveAspectRatio="none">
-        <path d="${sparkPath(posHist[p.symbol])}" fill="none" stroke="${c}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"></path>
+        <path class="pc-spark" d="" fill="none" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"></path>
       </svg>
       <div class="mono" style="display:flex; justify-content:space-between; font-size:9px; color:#1a1a3a">
         <span>Entry ${fprice(p.entry)}</span><span>SL ${fprice(p.sl)}</span><span>TP1 ${fprice(p.tp1)}</span><span>→</span>
-        <span style="color:#4a4a7a">${fprice(p.current)}</span>
+        <span class="pc-now" style="color:#4a4a7a"></span>
       </div>
     </div>`;
-  }).join(''));
+    }).join('');
+  }
+  // in-place field updates (every push, zero flicker)
+  ps.forEach(p => {
+    const card = el.querySelector(`[data-sym="${p.symbol}"]`);
+    if (!card) return;
+    const c = pnlCol(p.pnl_pct||0);
+    card.style.borderTopColor = c;
+    const pct = card.querySelector('.pc-pct');
+    pct.textContent = fsign(p.pnl_pct||0)+'%'; pct.style.color = c;
+    const usd = card.querySelector('.pc-usd');
+    usd.textContent = fsign(p.pnl_usd||0)+'$'; usd.style.color = pnlCol(p.pnl_usd||0);
+    const sp = card.querySelector('.pc-spark');
+    sp.setAttribute('d', sparkPath(posHist[p.symbol])); sp.setAttribute('stroke', c);
+    card.querySelector('.pc-now').textContent = fprice(p.current);
+  });
 }
 
 function renderGauges() {
