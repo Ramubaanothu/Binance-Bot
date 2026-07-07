@@ -192,44 +192,49 @@ class Client:
         return self._post('/fapi/v1/order', p)
 
     def stop_market_order(self, sym, side, qty, stop_price):
-        """Place STOP_MARKET order on exchange (hard stop-loss)."""
+        """Exchange-side hard stop-loss via the ALGO ORDER API (Binance moved
+        conditional orders off /fapi/v1/order — error -4120 pointed here).
+        closePosition=true → closes whatever remains, survives partial closes,
+        and protects the position even when the bot/laptop is OFF."""
         if config.PAPER_MODE:
             return {'orderId': f'PAPER-SL-{int(time.time()*1000)}'}
         p = {
-            'symbol':      sym, 'side': side,
-            'type':        'STOP_MARKET',
-            'quantity':    self._fmt_qty(qty),
-            'stopPrice':   f"{stop_price:.8f}".rstrip('0').rstrip('.'),
-            'closeOnly':   'true',
-            'workingType': 'MARK_PRICE',   # index-based — immune to single-exchange stop hunts
+            'symbol':        sym, 'side': side,
+            'algoType':      'CONDITIONAL',
+            'type':          'STOP_MARKET',
+            'triggerPrice':  f"{stop_price:.8f}".rstrip('0').rstrip('.'),
+            'closePosition': 'true',
+            'workingType':   'MARK_PRICE',   # index-based — immune to stop hunts
         }
-        try:
-            return self._post('/fapi/v1/order', p)
-        except requests.HTTPError as e:
-            detail = ''
-            try: detail = e.response.json()
-            except: pass
-            raise requests.HTTPError(f"{e} | detail={detail}", response=e.response)
+        r = self._post('/fapi/v1/algoOrder', p)
+        r['orderId'] = r.get('algoId', '')   # normalize for existing bookkeeping
+        return r
 
     def take_profit_market_order(self, sym, side, qty, stop_price):
-        """Place TAKE_PROFIT_MARKET order on exchange (exchange-side TP1)."""
+        """Exchange-side TP via the ALGO ORDER API (reduceOnly + quantity)."""
         if config.PAPER_MODE:
             return {'orderId': f'PAPER-TP-{int(time.time()*1000)}'}
         p = {
-            'symbol':      sym, 'side': side,
-            'type':        'TAKE_PROFIT_MARKET',
-            'quantity':    self._fmt_qty(qty),
-            'stopPrice':   f"{stop_price:.8f}".rstrip('0').rstrip('.'),
-            'closeOnly':   'true',
-            'workingType': 'MARK_PRICE',   # index-based — immune to single-exchange stop hunts
+            'symbol':       sym, 'side': side,
+            'algoType':     'CONDITIONAL',
+            'type':         'TAKE_PROFIT_MARKET',
+            'quantity':     self._fmt_qty(qty),
+            'triggerPrice': f"{stop_price:.8f}".rstrip('0').rstrip('.'),
+            'reduceOnly':   'true',
+            'workingType':  'MARK_PRICE',
         }
+        r = self._post('/fapi/v1/algoOrder', p)
+        r['orderId'] = r.get('algoId', '')
+        return r
+
+    def cancel_algo(self, sym, algo_id):
+        """Cancel a conditional (algo) order — SL/TP guards live here now."""
+        if config.PAPER_MODE or not algo_id or str(algo_id).startswith('PAPER'):
+            return
         try:
-            return self._post('/fapi/v1/order', p)
-        except requests.HTTPError as e:
-            detail = ''
-            try: detail = e.response.json()
-            except: pass
-            raise requests.HTTPError(f"{e} | detail={detail}", response=e.response)
+            self._delete('/fapi/v1/algoOrder', {'symbol': sym, 'algoId': algo_id})
+        except Exception:
+            pass
 
     def income(self, sym: str, income_type: str = 'FUNDING_FEE', start_ms: int = 0):
         """Income history (funding fees, commissions) for a symbol since start_ms."""
@@ -551,49 +556,43 @@ class AlphaBot:
 
     # ── Exchange order guards (SL + TP1 placed as real orders) ───────────────
     def _place_exchange_guards(self, sym: str, pos: dict):
-        """Place STOP_MARKET + TAKE_PROFIT_MARKET on exchange at entry.
-        NOTE: Binance Futures testnet disables conditional orders (error -4120).
-        In production these work and protect positions when bot is offline.
-        The bot's internal update_positions() loop manages SL/TP while running."""
+        """Place SL + TP1 conditional orders on the exchange (Algo Order API).
+        These live on Binance's servers — the position stays protected even if
+        the bot/laptop is OFF. Works on testnet too (verified 2026-07-07)."""
         d          = pos['direction']
         close_side = 'SELL' if d == 'long' else 'BUY'
         qty        = pos['qty']
         try:
             sl_resp = self.client.stop_market_order(sym, close_side, qty, pos['sl'])
             pos['sl_order_id'] = str(sl_resp.get('orderId', ''))
-            log.info(f"[GUARDS ] {sym} SL={pos['sl']:.6g} placed (#{pos['sl_order_id']})")
+            log.info(f"[GUARDS ] {sym} SL={pos['sl']:.6g} on exchange (#{pos['sl_order_id']})")
         except Exception as e:
-            errmsg = str(e)
-            if '-4120' in errmsg:
-                log.debug(f"[GUARDS ] {sym} SL: testnet conditional orders disabled (production-only feature)")
-            else:
-                log.warning(f"[GUARDS ] {sym} SL order failed: {errmsg[:80]}")
+            log.warning(f"[GUARDS ] {sym} SL order failed: {str(e)[:100]}")
         try:
             tp_resp = self.client.take_profit_market_order(sym, close_side, qty, pos['tp1'])
             pos['tp1_order_id'] = str(tp_resp.get('orderId', ''))
-            log.info(f"[GUARDS ] {sym} TP1={pos['tp1']:.6g} placed (#{pos['tp1_order_id']})")
+            log.info(f"[GUARDS ] {sym} TP1={pos['tp1']:.6g} on exchange (#{pos['tp1_order_id']})")
         except Exception as e:
-            errmsg = str(e)
-            if '-4120' in errmsg:
-                log.debug(f"[GUARDS ] {sym} TP1: testnet conditional orders disabled (production-only feature)")
-            else:
-                log.warning(f"[GUARDS ] {sym} TP1 order failed: {errmsg[:80]}")
+            log.warning(f"[GUARDS ] {sym} TP1 order failed: {str(e)[:100]}")
 
     def _cancel_exchange_guards(self, sym: str, pos: dict):
-        """Cancel all open orders for sym when we are closing the position ourselves."""
+        """Cancel this position's guard orders before we close it ourselves."""
+        self.client.cancel_algo(sym, pos.get('sl_order_id', ''))
+        self.client.cancel_algo(sym, pos.get('tp1_order_id', ''))
         try:
-            self.client.cancel_all_orders(sym)
+            self.client.cancel_all_orders(sym)   # sweep any legacy strays
         except Exception:
             pass
 
     def _move_sl_to_breakeven(self, sym: str, pos: dict):
-        """After TP1 hits: cancel old SL + TP1 orders, place new SL at entry (breakeven)."""
+        """After TP1 hits: cancel old guards, place a fresh SL at entry (breakeven)."""
         d          = pos['direction']
         sign       = +1 if d == 'long' else -1
         be_price   = round(pos['entry'] * (1 + sign * 0.0005), 8)  # entry + 0.05% buffer
         close_side = 'SELL' if d == 'long' else 'BUY'
         try:
-            self.client.cancel_all_orders(sym)
+            self.client.cancel_algo(sym, pos.get('sl_order_id', ''))
+            self.client.cancel_algo(sym, pos.get('tp1_order_id', ''))
             time.sleep(0.3)
             sl_resp = self.client.stop_market_order(sym, close_side, pos['qty'], be_price)
             pos['sl_order_id']  = str(sl_resp.get('orderId', ''))
@@ -601,10 +600,8 @@ class AlphaBot:
             pos['trail_sl']     = be_price
             log.info(f"[GUARDS ] {sym} SL moved to BE={be_price:.6g} (#{pos['sl_order_id']})")
         except Exception as e:
-            errmsg = str(e)
-            pos['trail_sl'] = be_price  # still update internal SL even if exchange order fails
-            if '-4120' not in errmsg:
-                log.warning(f"[GUARDS ] {sym} BE move failed: {errmsg[:80]}")
+            pos['trail_sl'] = be_price  # internal SL still protects while bot runs
+            log.warning(f"[GUARDS ] {sym} BE move failed: {str(e)[:100]}")
 
     # ── Startup reconciliation ────────────────────────────────────────────────
     async def _reconcile_positions(self):
