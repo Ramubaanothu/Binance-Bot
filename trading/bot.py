@@ -751,11 +751,15 @@ class AlphaBot:
             loop  = asyncio.get_event_loop()
             risks = await loop.run_in_executor(None, self.client.position_risk)
 
-            # Build map: symbol → full exchange position row
+            # Build map: symbol → full exchange position row.
+            # QUOTE-SCOPED: each bot only manages its own quote asset (main=USDT,
+            # reverse=USDC) so two bots on one account never adopt each other's
+            # positions as orphans.
             ex_map = {
                 r['symbol']: r
                 for r in risks
                 if abs(float(r.get('positionAmt', 0))) > 1e-9
+                and r['symbol'].endswith(QUOTE)
             }
 
             # 1. Remove stale disk positions (closed on exchange)
