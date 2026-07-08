@@ -27,7 +27,7 @@ import logging
 import math
 import threading
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from collections import deque, defaultdict
 
 import requests
@@ -36,6 +36,13 @@ import pandas as pd
 import websockets
 
 import config
+
+# REVERSE EXPERIMENT: set ALPHABOT_REVERSE=1 → this process trades the EXACT
+# OPPOSITE of every signal, liberally gated, on USDC perps (separate wallet).
+import os as _os
+REVERSE = _os.environ.get('ALPHABOT_REVERSE') == '1'
+QUOTE   = 'USDC' if REVERSE else 'USDT'
+
 from indicators import TAEngine, SignalResult
 
 # ─── Logger ───────────────────────────────────────────────────────────────────
@@ -44,7 +51,7 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.FileHandler('reverse_bot.log' if _os.environ.get('ALPHABOT_REVERSE') == '1' else 'bot.log', encoding='utf-8'),
     ]
 )
 log = logging.getLogger('AlphaBot')
@@ -297,7 +304,7 @@ class Client:
             acc = self.account()
             bal = None
             for a in acc.get('assets', []):
-                if a['asset'] == 'USDT':
+                if a['asset'] == QUOTE:
                     bal = float(a['availableBalance']); break
             if bal is None:
                 wb = float(acc.get('totalWalletBalance', 0))
@@ -520,8 +527,9 @@ class AlphaBot:
         self._load_trades()
         self._load_positions()   # restore positions from disk on every startup
 
-    _TRADES_FILE    = Path(__file__).parent / 'trades_binance.json'
-    _POSITIONS_FILE = Path(__file__).parent / 'positions_binance.json'
+    _TRADES_FILE    = Path(__file__).parent / ('trades_reverse.json' if REVERSE else 'trades_binance.json')
+    _POSITIONS_FILE = Path(__file__).parent / ('positions_reverse.json' if REVERSE else 'positions_binance.json')
+    _JOURNAL_FILE   = Path(__file__).parent / ('journal_reverse.jsonl' if REVERSE else 'journal.jsonl')
 
     def _load_trades(self):
         if not self._TRADES_FILE.exists():
@@ -573,6 +581,100 @@ class AlphaBot:
             log.warning(f"[STATE  ] Position save error: {e}")
 
     # ── Exchange order guards (SL + TP1 placed as real orders) ───────────────
+    def _journal(self, stage: str, data: dict):
+        """Append one evidence record: every candidate, rejection, entry and
+        exit — the dataset that lets us measure which gates earn their keep."""
+        try:
+            rec = {'ts': round(time.time(), 1), 't': datetime.now().strftime('%m-%d %H:%M:%S'),
+                   'stage': stage}
+            rec.update(data)
+            with open(self._JOURNAL_FILE, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(rec, default=str) + '\n')
+        except Exception:
+            pass
+
+    @staticmethod
+    def _feat(a: dict) -> dict:
+        """Trimmed feature vector of an analysis dict for the journal."""
+        return {k: a.get(k) for k in ('symbol', 'direction', 'confidence', 'regime',
+                'adx', 'rsi', 'atr_pct', 'vol_ratio', 'ext_atr', 'ext_1h', 'rng_pos',
+                'ema_dist', 'vwap_dist', 'move_15m', 'move_1h', 'h1_bull', 'h4_bull',
+                'd1_bull', 'oi_bias', 'ls_ratio', 'funding', 'patterns')}
+
+    async def open_reverse_position(self, a: dict):
+        """REVERSE EXPERIMENT: execute the EXACT OPPOSITE of the signal, with
+        liberal gates (confidence only) at 2% risk on the USDC wallet."""
+        sym = a['symbol']
+        if sym in self.positions or not self.guards_ok(): return
+        if time.time() < self._sym_cooldown.get(sym, 0): return
+        if len(self.positions) >= config.MAX_POSITIONS: return
+        conf = a['confidence']
+        if conf < 45:                      # liberal: one loose confidence bar
+            return
+        # THE FLIP: whatever the strategy wants, do the opposite
+        direction = 'short' if a['direction'] == 'long' else 'long'
+        a = dict(a); a['direction'] = direction
+        lev = 6                            # modest fixed leverage for the experiment
+
+        try:
+            venue_px = self.client.price(sym)
+        except Exception:
+            return
+        atr   = a.get('atr', venue_px * 0.005) or venue_px * 0.005
+        exits = self.compute_exits(direction, venue_px, atr, sym)
+        exits = self._clamp_sl_roi(direction, venue_px, lev, exits)
+        sl_dist = abs(venue_px - exits['sl'])
+
+        risk_usd = self.balance * 0.02     # 2% of the USDC wallet
+        notional = risk_usd / max(sl_dist / venue_px, 1e-6)
+        notional = min(notional, self.balance * lev * 0.20)
+        notional = max(notional, config.MIN_NOTIONAL_USDT)
+        qty = self.client.round_qty(sym, notional / venue_px)
+        if qty <= 0:
+            return
+        try:
+            self.client.set_margin_type(sym)
+            self.client.set_leverage(sym, lev)
+        except Exception:
+            pass
+        try:
+            resp = self.client.market_order(sym, 'BUY' if direction == 'long' else 'SELL',
+                                            qty, current_price=venue_px)
+        except Exception as e:
+            self.emit('warn', f"REV order FAIL {sym}: {e}"); return
+
+        entry = float(resp.get('avgPrice') or venue_px) or venue_px
+        exits = self.compute_exits(direction, entry, atr, sym)
+        exits = self._clamp_sl_roi(direction, entry, lev, exits)
+        self.positions[sym] = {
+            'symbol': sym, 'direction': direction, 'entry': entry, 'current': entry,
+            'peak': entry, 'runner': False, 'qty': qty,
+            'size_usd': round(qty * entry, 4), 'leverage': lev, 'is_major': False,
+            'sl': exits['sl'], 'tp1': exits['tp1'], 'tp2': exits['tp2'], 'tp3': exits['tp3'],
+            'trail_sl': exits['sl'], 'trail_dist': exits['trail_dist'],
+            'be_locked': False, 'tp1_hit': False, 'tp2_hit': False,
+            'phase': 'open', 'pnl_pct': 0.0, 'pnl_usd': 0.0,
+            'conf': conf, 'regime': a.get('regime', ''), 'patterns': a.get('patterns', []),
+            'atr': atr, 'atr_pct': a.get('atr_pct', 0), 'adx': a.get('adx', 0),
+            'rsi': a.get('rsi', 0), 'cloud_bull': a.get('cloud_bull', False),
+            'squeeze': a.get('squeeze', False), 'funding': a.get('funding', 0),
+            'ls_ratio': a.get('ls_ratio', 1.0), 'oi_bias': a.get('oi_bias', 0),
+            'pivot': a.get('pivot', {}), 'open_time': datetime.now().strftime('%H:%M:%S'),
+            'open_ms': int(time.time() * 1000), 'session': current_session(),
+            'vol_ratio': a.get('vol_ratio', 1.0), 'rr_ratio': 0,
+            'order_id': resp.get('orderId', ''), 'sl_order_id': '', 'tp1_order_id': '',
+        }
+        self._place_exchange_guards(sym, self.positions[sym])
+        self._save_positions()
+        self._journal('entry', {'entry': entry, 'qty': qty, 'lev': lev,
+                                'flipped_from': 'long' if direction == 'short' else 'short',
+                                **self._feat(a)})
+        self.balance = self.client.usdt_balance(self.paper_balance)
+        self.emit('exec',
+            f"🔄[REVERSE] {'LONG' if direction == 'long' else 'SHORT'} {sym} @ {entry:.6g} | "
+            f"qty={qty} lev={lev}x | signal said {('LONG' if direction == 'short' else 'SHORT')} "
+            f"{conf:.0f}% — we flipped it | SL={exits['sl']:.5g} TP1={exits['tp1']:.5g}")
+
     def _clamp_sl_roi(self, direction: str, entry: float, lev: int, exits: dict) -> dict:
         """Cap the stop so the worst case is SL_MAX_ROI percent ROI (user: 7%).
         ATR stops stay when tighter; wide ones are pulled in."""
@@ -819,6 +921,17 @@ class AlphaBot:
             self.emit('warn', f"[RECONCILE] Failed: {e}")
 
     def emit(self, kind: str, msg: str):
+        if kind == 'fail':
+            try:
+                _sym = msg.split()[0]
+                _a   = getattr(self, '_last_analysis', {}).get(_sym)
+                if _a is not None:
+                    self._journal('reject', {'reason': msg[:160], **self._feat(_a)})
+            except Exception:
+                pass
+        return self._emit_inner(kind, msg)
+
+    def _emit_inner(self, kind: str, msg: str):
         e = {'ts': datetime.now().strftime('%H:%M:%S'), 'type': kind, 'msg': msg}
         self.scan_log.appendleft(e)
         log.info(f"[{kind.upper():8}] {msg}")
@@ -1508,6 +1621,10 @@ class AlphaBot:
 
     async def open_position(self, a: dict):
         sym = a['symbol']
+        if not hasattr(self, '_last_analysis'): self._last_analysis = {}
+        self._last_analysis[sym] = a
+        if REVERSE:
+            return await self.open_reverse_position(a)
         if sym in self.positions: return
         if getattr(config, 'BTC_ONLY_MODE', False) and sym in getattr(config, 'CHART_SYMBOLS', ['BTCUSDT']):
             return   # the pure-chart loop owns these — scanner trades other alts
@@ -1976,6 +2093,8 @@ class AlphaBot:
         # Place hard SL + TP1 orders on exchange — survive bot offline
         self._place_exchange_guards(sym, self.positions[sym])
         self._save_positions()
+        self._journal('entry', {'entry': entry, 'qty': qty, 'lev': lev,
+                                'runner': is_runner, **self._feat(a)})
         if config.PAPER_MODE:
             self.paper_balance -= qty * entry / lev
         self.balance = self.client.usdt_balance(self.paper_balance)
@@ -2273,9 +2392,33 @@ class AlphaBot:
             'is_win':     is_win,
             'funding':    round(funding, 4),
             'sharpe_now': round(self.perf.sharpe, 2),
+            # ── evidence-layer features (for journal_report.py analysis) ──
+            'rr_ratio':   pos.get('rr_ratio', 0),
+            'is_runner':  bool(pos.get('runner')),
+            'leverage':   pos.get('leverage', 0),
+            'adx':        pos.get('adx', 0),
+            'rsi':        pos.get('rsi', 0),
+            'atr_pct':    pos.get('atr_pct', 0),
+            'is_major':   bool(pos.get('is_major')),
+            'entry_hour_ist': (datetime.utcnow() + timedelta(hours=5, minutes=30)).hour,
+            'held_min':   round((time.time() - pos.get('open_ms', time.time()*1000) / 1000) / 60, 1),
         }
         self.trades.append(t)
         self._save_trades()
+        # append to the immutable journal (one line per closed trade, never trimmed)
+        try:
+            with open(Path(__file__).parent / 'trade_journal.jsonl', 'a', encoding='utf-8') as _jf:
+                _jf.write(json.dumps(t, default=str) + '\n')
+        except Exception:
+            pass
+        self._journal('exit', {'symbol': sym, 'direction': d, 'pnl_pct': t['pnl_pct'],
+                               'pnl_usd': t['pnl_usd'], 'reason': reason,
+                               'is_win': is_win, 'conf': pos.get('conf'),
+                               'regime': pos.get('regime'), 'adx': pos.get('adx'),
+                               'rsi': pos.get('rsi'), 'atr_pct': pos.get('atr_pct'),
+                               'session': pos.get('session'), 'lev': pos.get('leverage'),
+                               'funding': funding, 'open_time': pos.get('open_time'),
+                               'close_time': t['close_time']})
         del self.positions[sym]
         self._save_positions()
         self._recently_closed[sym] = time.time()   # reconcile ghost guard
@@ -2327,7 +2470,7 @@ class AlphaBot:
             tickers = self.client.tickers_24h()
             # All USDT perps with minimum volume filter (very low to catch everything)
             all_perps = [t for t in tickers
-                         if t['symbol'].endswith('USDT')
+                         if t['symbol'].endswith(QUOTE)
                          and '_' not in t['symbol']]
             perps = [t for t in all_perps
                      if float(t.get('quoteVolume', 0)) >= config.MIN_VOLUME_USDT]
@@ -2395,7 +2538,7 @@ class AlphaBot:
             self._fear_greed   = await loop2.run_in_executor(None, self._fetch_fear_greed)
             try:
                 tickers   = await loop2.run_in_executor(None, self.client.tickers_24h)
-                all_perps = [t for t in tickers if t['symbol'].endswith('USDT') and '_' not in t['symbol']]
+                all_perps = [t for t in tickers if t['symbol'].endswith(QUOTE) and '_' not in t['symbol']]
                 perps     = [t for t in all_perps if float(t.get('quoteVolume', 0)) >= config.MIN_VOLUME_USDT]
                 gainers   = sorted(perps, key=lambda x: float(x.get('priceChangePercent', 0)), reverse=True)
                 losers    = sorted(perps, key=lambda x: float(x.get('priceChangePercent', 0)))
@@ -2716,19 +2859,20 @@ class AlphaBot:
             log.error(f"[ASYNCIO UNHANDLED] {exc}")
         asyncio.get_event_loop().set_exception_handler(_async_exc_handler)
 
+        ws_port = config.WS_PORT + 2 if REVERSE else config.WS_PORT
         # Bind the dashboard port patiently: after a restart Windows can hold the
         # old socket for a few seconds — wait for it instead of crashing
         server = None
         for _attempt in range(30):
             try:
-                server = await websockets.serve(self.ws_handler, config.WS_HOST, config.WS_PORT)
+                server = await websockets.serve(self.ws_handler, config.WS_HOST, ws_port)
                 break
             except OSError:
                 if _attempt == 0:
-                    log.info(f"[BOOT] Port {config.WS_PORT} still held by previous instance — waiting...")
+                    log.info(f"[BOOT] Port {ws_port} still held by previous instance — waiting...")
                 await asyncio.sleep(1)
         if server is None:
-            log.error(f"[BOOT] Port {config.WS_PORT} blocked for 30s — is another bot already running?")
+            log.error(f"[BOOT] Port {ws_port} blocked for 30s — is another bot already running?")
             raise SystemExit(1)
         # Real-time push streams from Binance (auto-reconnect, REST stays as fallback)
         asyncio.get_event_loop().create_task(self._mark_price_stream())
@@ -2754,7 +2898,9 @@ class AlphaBot:
         print("  Open: terminal.html in Chrome")
         print(sep)
         # Run trading loops; server runs in background as long as event loop is alive
-        if getattr(config, 'BTC_ONLY_MODE', False) and getattr(config, 'ALT_TRADING', False):
+        if REVERSE:
+            await self.scan_loop()          # reverse experiment: scanner only
+        elif getattr(config, 'BTC_ONLY_MODE', False) and getattr(config, 'ALT_TRADING', False):
             # DUAL MODE: BTC pure-chart loop + conservative alt scanner in parallel.
             # scan_loop performs the boot (precisions/balance/reconcile); the chart
             # loop skips its own boot to avoid doing it twice.
