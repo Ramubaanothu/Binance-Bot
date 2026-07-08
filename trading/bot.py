@@ -1517,7 +1517,7 @@ class AlphaBot:
             self.start_bal   = self.balance
             self.peak_bal    = self.balance
             self.daily_start = self.balance
-            self.emit('info', f"💰 {'📄 PAPER' if config.PAPER_MODE else '🔴 LIVE'} MODE | Balance: ${self.balance:.4f} USDT")
+            self.emit('info', f"💰 {'📄 PAPER' if config.PAPER_MODE else '🔴 LIVE'} MODE | Balance: ${self.balance:.4f} {QUOTE}")
             await self._reconcile_positions()
         else:
             await asyncio.sleep(20)   # let scan_loop finish its boot first
@@ -2461,7 +2461,7 @@ class AlphaBot:
         self.peak_bal   = self.balance
         self.daily_start= self.balance
         mode = "📄 PAPER MODE" if config.PAPER_MODE else "🔴 LIVE MODE"
-        self.emit('info', f"💰 {mode} | Balance: ${self.balance:.4f} USDT")
+        self.emit('info', f"💰 {mode} | Balance: ${self.balance:.4f} {QUOTE}")
 
         # Reconcile disk positions with exchange on every startup
         await self._reconcile_positions()
@@ -2512,7 +2512,7 @@ class AlphaBot:
                 'btc_change': round(float(next((t.get('priceChangePercent', 0) for t in perps if t['symbol'] == 'BTCUSDT'), 0)), 2),
             }
             self.emit('info',
-                f"🔭 Universe: {len(symbols)} USDT perps | "
+                f"🔭 Universe: {len(symbols)} {QUOTE} perps | "
                 f"📈 {up_n} up / 📉 {dn_n} down | mood={self.market_intel['market_mood']} | "
                 f"🔥 Top mover: {by_move[0]['symbol']} {float(by_move[0].get('priceChangePercent',0)):+.1f}%"
             )
