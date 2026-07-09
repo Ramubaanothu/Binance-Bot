@@ -695,6 +695,17 @@ class AlphaBot:
             return False
         return (time.time() * 1000 - ob) < getattr(config, 'NEW_COIN_DAYS', 14) * 86400_000
 
+    def _roi_target_price(self, pos: dict) -> float:
+        """Price corresponding to this position's REAL take-profit target
+        (TAKE_PROFIT_ROI_1 for scalps, RUNNER_TP_ROI_1 for runners) — the
+        same number the internal monitor uses. The exchange TP guard must
+        match this, not the old ATR-based pos['tp1'] (that mismatch closed
+        BTC at +3.99% ROI when the real target was +6%)."""
+        sign = 1 if pos['direction'] == 'long' else -1
+        lev  = pos.get('leverage', config.LEVERAGE) or 1
+        roi  = config.RUNNER_TP_ROI_1 if pos.get('runner') else config.TAKE_PROFIT_ROI_1
+        return round(pos['entry'] * (1 + sign * (roi / lev) / 100), 10)
+
     def _place_exchange_guards(self, sym: str, pos: dict):
         """Place SL + TP1 conditional orders on the exchange (Algo Order API).
         These live on Binance's servers — the position stays protected even if
@@ -709,9 +720,10 @@ class AlphaBot:
         except Exception as e:
             log.warning(f"[GUARDS ] {sym} SL order failed: {str(e)[:100]}")
         try:
-            tp_resp = self.client.take_profit_market_order(sym, close_side, qty, pos['tp1'])
+            tp_price = self._roi_target_price(pos)   # matches the real ROI target, not stale ATR tp1
+            tp_resp = self.client.take_profit_market_order(sym, close_side, qty, tp_price)
             pos['tp1_order_id'] = str(tp_resp.get('orderId', ''))
-            log.info(f"[GUARDS ] {sym} TP1={pos['tp1']:.6g} on exchange (#{pos['tp1_order_id']})")
+            log.info(f"[GUARDS ] {sym} TP1={tp_price:.6g} on exchange (#{pos['tp1_order_id']})")
         except Exception as e:
             log.warning(f"[GUARDS ] {sym} TP1 order failed: {str(e)[:100]}")
 
