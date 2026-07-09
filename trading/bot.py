@@ -2338,15 +2338,19 @@ class AlphaBot:
             return   # recent close attempt failed — wait before retrying
         # Cancel exchange SL/TP orders before closing — prevents double-close
         self._cancel_exchange_guards(sym, pos)
+        is_ghost = False
         if not external:   # external = already closed on exchange (e.g. in the app)
             pos['_closing'] = True   # guard: stream handler must not double-book
             try:
                 self.client.market_order(sym, 'SELL' if d == 'long' else 'BUY', pos['qty'], reduce=True)
             except Exception as e:
                 if '-2022' in str(e):
-                    # ReduceOnly rejected = nothing to reduce → position doesn't
-                    # exist on the exchange (ghost) — book it out, don't keep it
-                    reason = f'{reason} (GHOST)'
+                    # ReduceOnly rejected = nothing to reduce → the exchange-side
+                    # SL/TP guard already closed this position moments earlier.
+                    # The trade is REAL; P&L is corrected from Binance's ledger
+                    # below, so no more "(GHOST)" mislabel — just note the source.
+                    is_ghost = True
+                    reason = f'{reason} (exchange-filled)'
                 else:
                     # CRITICAL: keep the position — deleting it here would leave an
                     # unmanaged orphan open on the exchange with no stop-loss
@@ -2364,6 +2368,27 @@ class AlphaBot:
                 funding = sum(float(i.get('income', 0) or 0) for i in inc)
             except Exception as _fe:
                 log.debug(f"funding fetch {sym}: {_fe}")
+
+        # ── GHOST FIX: when the exchange closed the position before we did (or
+        # this is an externally-confirmed close), don't trust our last internal
+        # mark-price read for P&L — pull the REAL realized P&L straight from
+        # Binance's own ledger. This is what was producing the inflated/odd
+        # numbers on GHOST-tagged exits (e.g. INJ showing -9.11% instead of the
+        # true ~-7% the exchange stop actually filled at).
+        if (is_ghost or external) and not config.PAPER_MODE and pos.get('open_ms', 0) > 0:
+            try:
+                real_events = self.client.income(sym, 'REALIZED_PNL', pos['open_ms'])
+                if real_events:
+                    real_pnl = sum(float(e.get('income', 0) or 0) for e in real_events)
+                    margin = pos['size_usd'] / pos.get('leverage', config.LEVERAGE) if pos['size_usd'] else 0
+                    corrected_pct = (real_pnl / margin * 100) if margin else pnl_pct
+                    log.info(f"[GHOST-FIX] {sym} corrected from internal {pnl_pct:+.2f}%/"
+                             f"${pos['pnl_usd']:+.2f} -> real {corrected_pct:+.2f}%/${real_pnl:+.2f} "
+                             f"(Binance ledger, {len(real_events)} event(s))")
+                    pnl_pct = corrected_pct
+                    pos['pnl_usd'] = real_pnl
+            except Exception as _ge:
+                log.debug(f"[GHOST-FIX] {sym} realized-pnl lookup failed: {_ge}")
 
         is_win  = pnl_pct > 0.01
         pnl_usd = pos['pnl_usd'] + funding
