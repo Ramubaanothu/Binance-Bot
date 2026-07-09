@@ -245,6 +245,26 @@ class Client:
         except Exception:
             pass
 
+    def open_algo_orders(self, sym: str = None):
+        """All open Algo (conditional SL/TP) orders, optionally filtered to
+        one symbol. Legacy /fapi/v1/allOpenOrders does NOT see these —
+        they live on a separate order book."""
+        try:
+            r = self._get('/fapi/v1/openAlgoOrders', {}, auth=True)
+            return [o for o in r if not sym or o.get('symbol') == sym]
+        except Exception:
+            return []
+
+    def cancel_all_algo_orders(self, sym: str):
+        """Sweep-cancel EVERY open algo order for a symbol — not just the ones
+        we happen to have IDs for. Without this, stale/duplicate SL or TP
+        guards silently pile up (legacy cancel-all never touches algo orders)
+        and the OLDEST/closest one fires first, closing trades early."""
+        if config.PAPER_MODE:
+            return
+        for o in self.open_algo_orders(sym):
+            self.cancel_algo(sym, o.get('algoId'))
+
     def income(self, sym: str, income_type: str = 'FUNDING_FEE', start_ms: int = 0):
         """Income history (funding fees, commissions) for a symbol since start_ms."""
         p = {'symbol': sym, 'incomeType': income_type, 'limit': 100}
@@ -728,9 +748,9 @@ class AlphaBot:
             log.warning(f"[GUARDS ] {sym} TP1 order failed: {str(e)[:100]}")
 
     def _cancel_exchange_guards(self, sym: str, pos: dict):
-        """Cancel this position's guard orders before we close it ourselves."""
-        self.client.cancel_algo(sym, pos.get('sl_order_id', ''))
-        self.client.cancel_algo(sym, pos.get('tp1_order_id', ''))
+        """Cancel ALL of this symbol's guard orders — full algo sweep, not just
+        the tracked IDs (stale duplicates from old refreshes must die too)."""
+        self.client.cancel_all_algo_orders(sym)
         try:
             self.client.cancel_all_orders(sym)   # sweep any legacy strays
         except Exception:
@@ -783,6 +803,10 @@ class AlphaBot:
             # 2. Re-place guards for known positions
             for sym, pos in list(self.positions.items()):
                 self.emit('info', f"[RECONCILE] {sym} LIVE — refreshing exchange guards")
+                # Full algo sweep — legacy cancel-all never touches SL/TP guards,
+                # so without this stale/duplicate guards pile up (found 43 orphaned
+                # algo orders on the account, some triggering positions early).
+                await loop.run_in_executor(None, self.client.cancel_all_algo_orders, sym)
                 await loop.run_in_executor(None, self.client.cancel_all_orders, sym)
                 await asyncio.sleep(0.3)
                 self._place_exchange_guards(sym, pos)
