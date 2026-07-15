@@ -1586,6 +1586,21 @@ class AlphaBot:
                         f"| c15 {r['c15_pos']:.2f} ema {r['ema_dist']:+.2f}% "
                         f"→ {r['direction'].upper()} · {tag}")
                     if ok and _cs not in self.positions:
+                        # Correlation cap: BTC/ETH/SOL/BNB/XRP move together — a
+                        # same-direction chart entry on 4 of them within minutes
+                        # isn't 4 independent bets, it's one basket-wide bet
+                        # replayed 4x, multiplying exposure to a single dip
+                        # (e.g. 2026-07-15: SOL/ETH/BTC/BNB LONGed within 2 min,
+                        # then one short-term pullback stopped out all 4).
+                        chart_syms = set(getattr(config, 'CHART_SYMBOLS', ['BTCUSDT']))
+                        same_dir_open = any(
+                            s in chart_syms and p.get('direction') == direction
+                            for s, p in self.positions.items() if s != _cs
+                        )
+                        if same_dir_open:
+                            self.emit('info', f"📊 {_cs.replace('USDT','')} {direction.upper()} skipped — "
+                                               f"correlated major already open {direction}")
+                            continue
                         await self.open_btc_chart_position(r)
                 await self.push()
             except Exception as e:
@@ -1653,7 +1668,7 @@ class AlphaBot:
         self.balance = self.client.usdt_balance(self.paper_balance)
         v = r['votes']
         self.emit('exec',
-            f"📊[CHART] {'LONG' if direction == 'long' else 'SHORT'} BTCUSDT @ {entry:.2f} | "
+            f"📊[CHART] {'LONG' if direction == 'long' else 'SHORT'} {sym} @ {entry:.2f} | "
             f"qty={qty} lev={lev}x | score {r['score']:+.2f} ({conf:.0f}%) | "
             f"1m:{'↑' if v['1m']>0 else '↓'} 5m:{'↑' if v['5m']>0 else '↓'} "
             f"15m:{'↑' if v['15m']>0 else '↓'} 1h:{'↑' if v['1h']>0 else '↓'} | "
