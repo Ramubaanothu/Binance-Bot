@@ -1111,6 +1111,18 @@ def _hdr6(S: dict) -> Panel:
     return Panel(t, border_style='#123a33', padding=(0, 0))
 
 
+def _pf_txt(S: dict) -> str:
+    """Profit factor = gross win / gross loss. <1 means the book loses money
+    even when the win rate looks healthy — the single most important number
+    here, and it was missing from the CMD dashboard entirely."""
+    w, l = S.get('wins', 0) or 0, S.get('losses', 0) or 0
+    aw, al = S.get('avg_win', 0) or 0, S.get('avg_loss', 0) or 0
+    if not l or not al:
+        return 'PF —'
+    pf = (aw * w) / abs(al * l)
+    return f'PF {pf:.2f}'
+
+
 def _kpi6(S: dict) -> Panel:
     ps      = S.get('positions') or []
     unreal  = sum(p.get('pnl_usd', 0) for p in ps)
@@ -1146,7 +1158,7 @@ def _kpi6(S: dict) -> Panel:
     day_all = dpnl + (S.get('open_pnl') if S.get('open_pnl') is not None else unreal)
 
     g = Table.grid(expand=True)
-    for _ in range(10): g.add_column(justify='center')
+    for _ in range(11): g.add_column(justify='center')
     def cell(lbl, val, col):
         c = Text(justify='center')
         c.append(lbl + '\n', style=FAINT)
@@ -1161,7 +1173,8 @@ def _kpi6(S: dict) -> Panel:
         cell('TOTAL',    f'{tpnl:+,.2f}',  _pcol(tpnl)),
         cell('OPEN RISK', f'${risk:,.0f}', PINK if risk > equity * 0.1 else AMBER),
         cell('MAX DD',   f'{dd:.1f}%',     PINK if dd > 20 else AMBER),
-        cell('WIN',      f'{wr:.0f}%',     TEAL if wr >= 55 else AMBER),
+        cell('WIN / PF', f'{wr:.0f}% · {_pf_txt(S)}',
+             TEAL if wr >= 55 else AMBER),
         cell('POSITIONS', f"{len(ps)}/5",  TEAL),
         cell('WS',       '✓' if feed_age < 5 else f'{feed_age:.0f}s', TEAL if feed_age < 5 else PINK),
     )
@@ -1362,7 +1375,7 @@ def _exec6(S: dict) -> Panel:
     for col, w, j in (('Date', 6, 'left'), ('Time', 9, 'left'),
                       ('Pair', 13, 'left'), ('Side', 6, 'left'),
                       ('Exit', 10, 'right'), ('RR', 5, 'right'), ('PnL %', 8, 'right'),
-                      ('PnL $', 9, 'right'), ('Reason', 14, 'left'), ('Dur', 8, 'right')):
+                      ('PnL $', 9, 'right'), ('Reason', 30, 'left'), ('Dur', 8, 'right')):
         tbl.add_column(col, width=w, justify=j, no_wrap=True)
     if not tr:
         tbl.add_row(Text('No executions yet', style=FAINT), *[''] * 9)
@@ -1378,7 +1391,7 @@ def _exec6(S: dict) -> Panel:
             Text(f"{x.get('rr_ratio', 0):.1f}", style=FAINT),
             Text(f"{x.get('pnl_pct', 0):+.2f}%", style=f'bold {pc}'),
             Text(f"{x.get('pnl_usd', 0):+.2f}", style=f'bold {pc}'),
-            Text(str(x.get('reason', ''))[:14], style=TEAL if x.get('is_win') else PINK),
+            Text(str(x.get('reason', ''))[:30], style=TEAL if x.get('is_win') else PINK),
             Text(_dur6(x.get('open_time'), x.get('close_time')), style=FAINT),
         )
     # last-20 ribbon
