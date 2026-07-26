@@ -1113,9 +1113,23 @@ def _hdr6(S: dict) -> Panel:
 
 def _kpi6(S: dict) -> Panel:
     ps      = S.get('positions') or []
-    bal     = S.get('balance', 0.0)
     unreal  = sum(p.get('pnl_usd', 0) for p in ps)
-    equity  = bal + unreal
+    # 'balance' from the engine is availableBalance = FREE MARGIN, i.e. equity
+    # minus collateral locked in open trades. The old code did
+    # equity = balance + unreal, which double-discounted that locked margin and
+    # made both numbers disagree with the actual wallet. Use the engine's
+    # bal_detail when present; fall back to the old behaviour if it is absent.
+    bd      = S.get('bal_detail') or {}
+    wallet  = bd.get('wallet') or 0.0
+    equity  = bd.get('equity') or 0.0
+    free    = bd.get('free')
+    locked  = bd.get('locked') or 0.0
+    if not equity:                       # older engine build — approximate
+        free   = S.get('balance', 0.0) if free is None else free
+        equity = (free or 0.0) + unreal
+        wallet = wallet or equity - unreal
+    if free is None:
+        free = S.get('balance', 0.0)
     dpnl    = S.get('daily_pnl', 0.0)
     tpnl    = S.get('total_pnl', 0.0)
     dd      = S.get('max_dd', 0) or 0
@@ -1127,20 +1141,25 @@ def _kpi6(S: dict) -> Panel:
         e, ts_ = p.get('entry', 0), p.get('trail_sl', 0)
         if e: risk += max(0.0, sgn * (e - ts_) / e) * (p.get('size_usd', 0) or 0)
     feed_age = time.time() - _last_msg_ts if _last_msg_ts else 999
+    # daily_pnl counts CLOSED trades only — it reads 0.00 while trades are still
+    # open, so show realised + unrealised together here.
+    day_all = dpnl + (S.get('open_pnl') if S.get('open_pnl') is not None else unreal)
 
     g = Table.grid(expand=True)
-    for _ in range(9): g.add_column(justify='center')
+    for _ in range(10): g.add_column(justify='center')
     def cell(lbl, val, col):
         c = Text(justify='center')
         c.append(lbl + '\n', style=FAINT)
         c.append(val, style=f'bold {col}')
         return c
     g.add_row(
-        cell('BALANCE',  f'${bal:,.2f}',   TXT),
         cell('EQUITY',   f'${equity:,.2f}', TEAL if unreal >= 0 else PINK),
-        cell('DAY PNL',  f'{dpnl:+,.2f}',  _pcol(dpnl)),
+        cell('WALLET',   f'${wallet:,.2f}', TXT),
+        cell('FREE',     f'${free:,.2f}',   FAINT),
+        cell('OPEN PNL', f'{unreal:+,.2f}', _pcol(unreal)),
+        cell('DAY PNL',  f'{day_all:+,.2f}', _pcol(day_all)),
         cell('TOTAL',    f'{tpnl:+,.2f}',  _pcol(tpnl)),
-        cell('OPEN RISK', f'${risk:,.0f}', PINK if risk > bal * 0.1 else AMBER),
+        cell('OPEN RISK', f'${risk:,.0f}', PINK if risk > equity * 0.1 else AMBER),
         cell('MAX DD',   f'{dd:.1f}%',     PINK if dd > 20 else AMBER),
         cell('WIN',      f'{wr:.0f}%',     TEAL if wr >= 55 else AMBER),
         cell('POSITIONS', f"{len(ps)}/5",  TEAL),
@@ -1324,20 +1343,34 @@ def _dur6(o, c):
         return '—'
 
 
+def _short_date(d) -> str:
+    """'2026-07-26' -> '26 Jul'. Trades closed before close_date existed have
+    no date stored, so show '—' rather than inventing today's."""
+    if not d:
+        return '—'
+    try:
+        from datetime import datetime as _dt
+        return _dt.strptime(str(d), '%Y-%m-%d').strftime('%d %b')
+    except Exception:
+        return str(d)[-5:]
+
+
 def _exec6(S: dict) -> Panel:
     tr = list(reversed(S.get('trades') or []))[:20]
     tbl = Table(box=box.SIMPLE_HEAD, expand=True, padding=(0, 0),
                 header_style='bold dim', show_edge=False)
-    for col, w, j in (('Time', 9, 'left'), ('Pair', 13, 'left'), ('Side', 6, 'left'),
+    for col, w, j in (('Date', 6, 'left'), ('Time', 9, 'left'),
+                      ('Pair', 13, 'left'), ('Side', 6, 'left'),
                       ('Exit', 10, 'right'), ('RR', 5, 'right'), ('PnL %', 8, 'right'),
                       ('PnL $', 9, 'right'), ('Reason', 14, 'left'), ('Dur', 8, 'right')):
         tbl.add_column(col, width=w, justify=j, no_wrap=True)
     if not tr:
-        tbl.add_row(Text('No executions yet', style=FAINT), *[''] * 8)
+        tbl.add_row(Text('No executions yet', style=FAINT), *[''] * 9)
     for x in tr[:6]:
         is_l = x.get('direction') == 'long'
         pc   = _pcol(x.get('pnl_usd', 0))
         tbl.add_row(
+            Text(_short_date(x.get('close_date')), style=FAINT),
             Text(str(x.get('close_time', ''))[:8], style=FAINT),
             Text(str(x.get('symbol', '')), style=f'bold {TXT}'),
             Text('▲L' if is_l else '▼S', style=f'bold {TEAL if is_l else PINK}'),

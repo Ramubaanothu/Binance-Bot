@@ -317,6 +317,40 @@ class Client:
         """All open positions from exchange (/fapi/v2/positionRisk)."""
         return self._get('/fapi/v2/positionRisk', {}, auth=True)
 
+    def balance_detail(self, paper_balance: float = 0.0) -> dict:
+        """Full picture of the QUOTE asset, because these are NOT the same number
+        and conflating them made the dashboard disagree with the wallet:
+
+          wallet    walletBalance     — cash actually in the account
+          unreal    unrealizedProfit  — P&L of open positions, not yet booked
+          equity    marginBalance     — wallet + unreal  (true account value)
+          free      availableBalance  — equity MINUS margin locked in open trades
+          locked    positionInitialMargin
+
+        'free' collapses as positions open even though nothing was lost.
+        """
+        blank = {'wallet': 0.0, 'unreal': 0.0, 'equity': 0.0, 'free': 0.0, 'locked': 0.0}
+        if config.PAPER_MODE and paper_balance > 0:
+            return {**blank, 'wallet': paper_balance,
+                    'equity': paper_balance, 'free': paper_balance}
+        try:
+            for a in self.account().get('assets', []):
+                if a['asset'] == QUOTE:
+                    d = {
+                        'wallet': float(a.get('walletBalance', 0) or 0),
+                        'unreal': float(a.get('unrealizedProfit', 0) or 0),
+                        'equity': float(a.get('marginBalance', 0) or 0),
+                        'free':   float(a.get('availableBalance', 0) or 0),
+                        'locked': float(a.get('positionInitialMargin', 0) or 0),
+                    }
+                    if not d['equity']:
+                        d['equity'] = d['wallet'] + d['unreal']
+                    self._last_bal_detail = d
+                    return d
+        except Exception as e:
+            log.debug(f"balance_detail failed: {e}")
+        return getattr(self, '_last_bal_detail', blank)
+
     def usdt_balance(self, paper_balance: float = 0.0) -> float:
         if config.PAPER_MODE and paper_balance > 0:
             return paper_balance
@@ -1021,6 +1055,14 @@ class AlphaBot:
             'top_setups':     [{'s': r.get('symbol',''), 'd': r.get('direction',''),
                                 'c': round(r.get('confidence',0),1)}
                                for r in (self.scan_results or [])[:6]],
+            # Full wallet breakdown — 'balance' above is availableBalance (free
+            # margin), which is NOT the wallet and NOT equity. Send all of them
+            # so the dashboards can stop implying free margin is the account.
+            'bal_detail':      self.client.balance_detail(self.paper_balance),
+            # Day P&L above (daily_pnl) counts CLOSED trades only, so it reads
+            # 0.00 on a day where positions are open but nothing has exited yet.
+            'open_pnl':        round(sum(float(p.get('pnl_usd', 0) or 0)
+                                         for p in self.positions.values()), 4),
             'paper_mode':      config.PAPER_MODE,
             'btc_trend':       self._btc_trend,
             'btc_4h_trend':    self._btc_4h_trend,
@@ -2511,6 +2553,10 @@ class AlphaBot:
             'session':    pos.get('session', ''),
             'open_time':  pos['open_time'],
             'close_time': datetime.now().strftime('%H:%M:%S'),
+            # Date kept as its own field rather than folded into close_time —
+            # the dashboards slice close_time by character position ([:5], [:8]),
+            # so widening that string would silently corrupt every trade row.
+            'close_date': datetime.now().strftime('%Y-%m-%d'),
             'is_win':     is_win,
             'funding':    round(funding, 4),
             'sharpe_now': round(self.perf.sharpe, 2),
