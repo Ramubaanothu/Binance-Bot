@@ -193,17 +193,37 @@ def _kb_thread():
 
 # ─── Bot control ──────────────────────────────────────────────────────────────
 def restart_bot():
-    """Kill existing bot process and restart it."""
+    """Kill THIS folder's bot process and restart it.
+
+    Both bots run a file literally named 'bot.py', so matching on the script
+    name alone killed the OTHER bot too (main and reverse are separate
+    processes in separate folders, but identical command lines:
+    `python bot.py`). Scope the match by working directory so pressing R in
+    one dashboard can never take down the other bot.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
     try:
         import psutil
+        me = os.getpid()
         for proc in psutil.process_iter(['pid', 'cmdline']):
+            if proc.info['pid'] == me:
+                continue
             cmd = ' '.join(proc.info.get('cmdline') or [])
-            if BOT_SCRIPT in cmd and 'tui.py' not in cmd:
-                proc.kill()
+            if BOT_SCRIPT not in cmd or 'tui.py' in cmd:
+                continue
+            try:
+                # only kill a bot living in OUR folder
+                if os.path.normcase(proc.cwd()) != os.path.normcase(here):
+                    continue
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue          # can't prove it's ours — leave it alone
+            proc.kill()
         time.sleep(2)
     except ImportError:
-        # fallback on Windows
-        os.system(f'taskkill /F /FI "WINDOWTITLE eq {BOT_SCRIPT}" >nul 2>&1')
+        # fallback on Windows — no psutil, so we cannot tell the two bots
+        # apart safely. Do nothing rather than kill the wrong engine.
+        print('  [restart] psutil not installed — skipping kill '
+              '(pip install psutil to enable safe restart)')
 
     bot_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), BOT_SCRIPT)
     flags = subprocess.CREATE_NO_WINDOW if _WINDOWS else 0
