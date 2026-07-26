@@ -1578,8 +1578,29 @@ class AlphaBot:
                         located = r['c15_pos'] <= 0.60 and r['ema_dist'] <= 0.35
                     else:
                         located = r['c15_pos'] >= 0.40 and r['ema_dist'] >= -0.35
-                    ok  = strong and aligned and located
-                    tag = 'OK' if ok else ('extended — wait for pullback' if (strong and aligned) else 'waiting')
+                    # ── COUNTER-TREND BLOCK. Chart mode votes on 1m..1h only, so
+                    # it happily shorted into a market whose 4h AND daily were
+                    # both bull — and that is where the money went. Journal
+                    # evidence (111 trades) agrees across BOTH bots:
+                    #   main bot   shorts n=66 PF 0.46 (-$877) vs longs PF 0.59
+                    #   main bot   BTC longs  n=9  PF 3.89 (+$138)
+                    #   reverse bot longs (= fading SHORT signals) PF 5.51 (+$402)
+                    #              reverse bot shorts               PF 0.44 (-$356)
+                    # Both books independently say: trend-aligned wins, fighting
+                    # the higher timeframe loses. Unlike a symbol blacklist this
+                    # adapts on its own when the regime flips bearish.
+                    if getattr(config, 'CHART_HTF_BLOCK', True):
+                        _h4, _d1 = await asyncio.get_event_loop().run_in_executor(
+                            None, self._htf_trend, _cs)
+                        htf_ok = (_d1 and _h4) if r['direction'] == 'long' else (not _d1 and not _h4)
+                    else:
+                        htf_ok, _h4, _d1 = True, True, True
+                    ok  = strong and aligned and located and htf_ok
+                    if strong and aligned and located and not htf_ok:
+                        tag = (f"counter-trend — 4h {'bull' if _h4 else 'bear'} / "
+                               f"1d {'bull' if _d1 else 'bear'}, skipping")
+                    else:
+                        tag = 'OK' if ok else ('extended — wait for pullback' if (strong and aligned) else 'waiting')
                     _ar = ' '.join(f"{tf}:{'U' if r['votes'][tf] > 0 else 'D'}" for tf in ('1m','5m','15m','1h'))
                     self.emit('pass' if ok else 'info',
                         f"📊 {_cs.replace('USDT','')} {_ar} | score {r['score']:+.2f} "
