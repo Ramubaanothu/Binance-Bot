@@ -271,9 +271,16 @@ class Client:
         if start_ms > 0: p['startTime'] = start_ms
         return self._get('/fapi/v1/income', p, auth=True)
 
-    def income_all(self, start_ms: int = 0) -> list:
+    def income_all(self, start_ms: int = 0, asset: str = None) -> list:
         """FULL income history (realized P&L, commissions, funding, transfers)
-        since account day 1 — used to reconstruct the true wallet curve."""
+        since account day 1 — used to reconstruct the true wallet curve.
+
+        MUST be filtered by asset. The account holds both USDT and USDC, and
+        /fapi/v1/income returns records for BOTH. Summing them mixed the two
+        bots' books together: on 2026-07-26 the unfiltered sum was -$5.92
+        while this bot's own USDC income was +$146.25.
+        """
+        want = (asset or QUOTE)
         out, cur = [], start_ms
         for _ in range(30):                     # up to 30k records
             p = {'limit': 1000}
@@ -283,12 +290,24 @@ class Client:
             out.extend(batch)
             if len(batch) < 1000: break
             cur = int(batch[-1]['time']) + 1
-        return out
+        return [r for r in out if r.get('asset') == want]
 
     def wallet_balance(self) -> float:
-        """totalWalletBalance (excludes unrealized) — the equity anchor."""
+        """This bot's QUOTE-asset walletBalance (excludes unrealized).
+
+        NOT totalWalletBalance: that reports a single account-level figure
+        which, on this account, equals the USDT balance. The USDC bot was
+        therefore anchoring its entire equity curve to the USDT wallet
+        ($2,835 instead of $4,736) — the curve was charting the other bot's
+        money.
+        """
         acc = self.account()
-        return float(acc.get('totalWalletBalance', 0) or 0)
+        for a in acc.get('assets', []):
+            if a['asset'] == QUOTE:
+                wb = float(a.get('walletBalance', 0) or 0)
+                if wb:
+                    return wb
+        return float(acc.get('totalWalletBalance', 0) or 0)   # last resort
 
     def listen_key(self) -> str:
         """User-data stream key — lets Binance push account/position events to us."""
