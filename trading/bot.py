@@ -596,7 +596,17 @@ class AlphaBot:
             self.total_pnl = data.get('total_pnl', 0.0)
             self.avg_win   = data.get('avg_win', 0.0)
             self.avg_loss  = data.get('avg_loss', 0.0)
-            log.info(f"[STATE  ] Loaded {len(self.trades)} trades from disk ({self.wins}W/{self.losses}L)")
+            # Rebuild TODAY's realised P&L from the trade log. daily_pnl lives
+            # only in memory and was never restored here, so every engine
+            # restart silently reset it to 0.00 — the dashboard then read
+            # "no trades closed yet today" even after a day of closed trades.
+            _today = date.today().isoformat()
+            _todays = [t for t in self.trades if t.get('close_date') == _today]
+            self.daily_pnl = round(sum(float(t.get('pnl_usd', 0) or 0)
+                                       for t in _todays), 4)
+            log.info(f"[STATE  ] Loaded {len(self.trades)} trades from disk "
+                     f"({self.wins}W/{self.losses}L) | today: {len(_todays)} closed, "
+                     f"day P&L {self.daily_pnl:+.2f}")
         except Exception as e:
             log.warning(f"[STATE  ] Could not load trades: {e}")
 
