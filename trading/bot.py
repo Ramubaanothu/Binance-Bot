@@ -2273,8 +2273,15 @@ class AlphaBot:
                                           f"({'ROI' if be_roi and not be_price else 'price'} +{pnl_pct:.1f}%)")
                         self._save_positions()
 
-                # TP1 — bank half the position, move SL to breakeven, let rest run
-                if not pos['tp1_hit'] and sign * (current - pos['tp1']) >= 0:
+                # TP1 — bank half the position, move SL to breakeven, let rest run.
+                # SKIPPED for the full-take scalp profile (TAKE_PROFIT_ROI_1_SCALE
+                # >= 1). That profile exists to make ONE clean exit at +8% ROI, but
+                # this ATR-priced rung kept firing far earlier, closing 50% and
+                # arming the ATR trail that then cut the remainder short — the root
+                # cause of avg win ~+3.5% vs avg loss -7% at a 62% win rate.
+                # Runners (SCALE < 1) still scale out here as designed.
+                _full_take = (not pos.get('runner')) and _sc1 >= 0.999
+                if not _full_take and not pos['tp1_hit'] and sign * (current - pos['tp1']) >= 0:
                     pos['tp1_hit'] = True
                     pos['phase']   = 'tp1-trail'
                     await self._partial_close(sym, pos, config.TP1_SCALE_OUT, current)
@@ -2294,6 +2301,21 @@ class AlphaBot:
                 # ticks never ratcheted, letting +40% ROI decay to a BE exit.)
                 if sign > 0: pos['peak'] = max(pos.get('peak', entry), current)
                 else:        pos['peak'] = min(pos.get('peak', entry), current)
+
+                # ── PROFIT RATCHET (ROI-based) — arms LATE, keeps most of the gain.
+                # Deliberately does NOT trail from the first tick: that is what cut
+                # winners to +1.4% while losers ran to -7%. It only prevents a deep
+                # round-trip once the trade is already well into profit, leaving
+                # room to reach the +8% ROI full-take target.
+                _arm  = getattr(config, 'PROFIT_RATCHET_ARM_ROI', 5.0)
+                _keep = getattr(config, 'PROFIT_RATCHET_KEEP', 0.60)
+                if _arm > 0 and lev_used > 0:
+                    peak_roi = sign * (pos['peak'] / entry - 1) * 100 * lev_used
+                    if peak_roi >= _arm:
+                        floor_price = entry * (1 + sign * (peak_roi * _keep / lev_used) / 100)
+                        if sign * (floor_price - pos['trail_sl']) > 0:
+                            pos['trail_sl']  = round(floor_price, 8)
+                            pos['ratcheted'] = True
 
                 # ── R-multiple ladder — arms BEFORE BE-lock. A trade that earns
                 # a meaningful fraction of its risk must never round-trip to full
@@ -2328,7 +2350,8 @@ class AlphaBot:
                 if tp3_hit:
                     await self.close(sym, pos, pnl_pct, 'TP3 HIT')
                 elif sl_hit:
-                    if   pos['tp1_hit']:   r = 'TRAIL SL'
+                    if   pos.get('ratcheted'): r = 'PROFIT RATCHET'
+                    elif pos['tp1_hit']:   r = 'TRAIL SL'
                     elif pos['be_locked']: r = 'BE EXIT'
                     elif sign * (pos['trail_sl'] - pos['sl']) > 1e-12: r = 'RISK-CUT'  # R-ladder saved part of the risk
                     else:                  r = 'STOP LOSS'
