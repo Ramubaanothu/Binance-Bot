@@ -28,3 +28,11 @@ Thumbs.db
 
 # ── Claude Code internal ───────────────────────────────────────────────────
 .claude/
+
+# ── Runtime evidence + backups (regenerated; journal.jsonl is 13MB) ───────
+trading/journal.jsonl
+trading/trade_journal.jsonl
+trading/balance_history.json
+trading/*_archive_*.json
+*.bak
+New folder/
