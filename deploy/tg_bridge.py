@@ -14,7 +14,8 @@ Orders go to the Binance FUTURES TESTNET (play money). Every order previews
 first and waits for a confirmation. Only the chat that first messages the bot
 is ever served.
 """
-import json, os, re, time, hmac, hashlib, urllib.request, urllib.parse, urllib.error
+import json, os, re, time, hmac, hashlib, subprocess
+import urllib.request, urllib.parse, urllib.error
 
 CONF = '/home/bots/telegram/tg.conf'
 BASE = 'https://testnet.binancefuture.com'
@@ -296,6 +297,75 @@ def do_cancel_orders(sym):
     except Exception as e:
         return 'Cancel failed: %s' % e
 
+def server_status():
+    """Health of the droplet itself. Reads /proc and systemd - no root needed."""
+    out = ['🖥 *Server*']
+    try:
+        up = float(open('/proc/uptime').read().split()[0])
+        d, h, m = int(up // 86400), int(up % 86400 // 3600), int(up % 3600 // 60)
+        out.append('   up %s%dh %dm' % (('%dd ' % d) if d else '', h, m))
+    except Exception:
+        pass
+    try:
+        mi = {}
+        for ln in open('/proc/meminfo'):
+            k, v = ln.split(':', 1)
+            mi[k] = int(v.split()[0])
+        tot = mi['MemTotal'] // 1024
+        avail = mi.get('MemAvailable', mi['MemFree']) // 1024
+        used = tot - avail
+        out.append('   RAM  %d / %d MB  (%d%%)' % (used, tot, used * 100 // tot))
+    except Exception:
+        pass
+    try:
+        st = os.statvfs('/')
+        out.append('   Disk %.1f GB free of %.1f' % (
+            st.f_bavail * st.f_frsize / 1e9, st.f_blocks * st.f_frsize / 1e9))
+    except Exception:
+        pass
+    try:
+        la = open('/proc/loadavg').read().split()[:3]
+        ncpu = os.cpu_count() or 1
+        flag = '  (high)' if float(la[0]) > ncpu * 1.5 else ''
+        out.append('   Load %s %s %s  on %d vCPU%s' % (la[0], la[1], la[2], ncpu, flag))
+    except Exception:
+        pass
+
+    out.append('')
+    out.append('⚙ *Services*')
+    for sv in ('alphabot-main', 'alphabot-reverse', 'alphabot-hype', 'alphabot-telegram'):
+        try:
+            state = subprocess.run(['systemctl', 'is-active', sv], capture_output=True,
+                                   text=True, timeout=8).stdout.strip()
+            n = subprocess.run(['systemctl', 'show', '-p', 'NRestarts', '--value', sv],
+                               capture_output=True, text=True, timeout=8).stdout.strip()
+        except Exception:
+            state, n = 'unknown', '?'
+        emo = '🟢' if state == 'active' else '🔴'
+        extra = ('  (%s restarts)' % n) if n not in ('0', '?', '') else ''
+        out.append('%s %-9s %s%s' % (emo, sv.replace('alphabot-', ''), state, extra))
+
+    out.append('')
+    out.append('📈 *Last bot activity*')
+    for label in BOTS:
+        try:
+            with open(os.path.join(BOTS[label][0], 'bot.log'), 'rb') as f:
+                f.seek(0, 2); f.seek(max(0, f.tell() - 4000))
+                last = f.read().decode('utf-8', 'ignore').strip().splitlines()[-1]
+            ts = last[:19]
+            age = ''
+            try:
+                secs = int(time.time() - time.mktime(
+                    time.strptime(ts, '%Y-%m-%d %H:%M:%S')))
+                age = ('  (%ds ago)' % secs) if secs < 300 else ('  STALE %dm' % (secs // 60))
+            except Exception:
+                pass
+            out.append('   %-9s %s%s' % (label, ts, age))
+        except Exception:
+            out.append('   %-9s no log' % label)
+    return NL.join(out)
+
+
 # ── natural language ──────────────────────────────────────────────────────
 YES = {'yes', 'y', 'yeah', 'yep', 'ok', 'okay', 'go', 'go ahead', 'do it',
        'confirm', 'sure', 'proceed', 'send it', 'buy it', 'sell it', 'correct'}
@@ -316,6 +386,10 @@ def parse(chat, text):
         return 'Cancelled.' if PENDING.pop(chat, None) else 'Nothing to cancel.'
     if bare in ('start', 'help', 'commands') or 'what can you do' in t:
         return HELP
+
+    # server / infrastructure health
+    if re.search(r'\b(server|vps|vcpu|cpu|droplet|machine|host|uptime|health|memory|ram|disk|load|service|services)\b', t):
+        return server_status()
 
     # status questions
     if re.search(r'\b(order|pending)s?\b', t) and not re.search(r'\b(buy|sell)\b', t):
@@ -384,6 +458,7 @@ HELP = NL.join([
     '   show positions',
     "   what's main doing",
     '   any pending orders',
+    '   server status',
     '',
     '*Trading* (futures testnet, default $%g)' % DEFAULT_USD,
     '   buy 200 doge',
