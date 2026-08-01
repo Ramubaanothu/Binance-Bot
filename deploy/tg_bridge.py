@@ -127,6 +127,17 @@ def jload(p):
     except Exception:
         return {}
 
+def is_paper(d):
+    """A paper book's positions are simulated and will NOT match the exchange.
+    Labelling this is essential: the hype bot showed five holdings while
+    Binance held none of them, which reads as a bug rather than by design."""
+    try:
+        src = open(os.path.join(d, 'config.py'), encoding='utf-8').read()
+        m = re.search(r'^PAPER_MODE\s*=\s*(\w+)', src, re.M)
+        return bool(m and m.group(1) == 'True')
+    except Exception:
+        return False
+
 def fmt_bot(label):
     d, posf, trf = BOTS[label]
     if not os.path.isdir(d):
@@ -135,7 +146,9 @@ def fmt_bot(label):
     tr = jload(os.path.join(d, trf))
     today = time.strftime('%Y-%m-%d')
     tt = [t for t in tr.get('trades', []) if t.get('close_date') == today]
-    out = ['*' + label.upper() + '*']
+    paper = is_paper(d)
+    out = ['*' + label.upper() + ('*  📄 _paper — simulated, not on Binance_'
+                                  if paper else '*  🔴 _live_')]
     if pos:
         for s, p in pos.items():
             emo = '🟢' if p.get('pnl_usd', 0) >= 0 else '🔴'
