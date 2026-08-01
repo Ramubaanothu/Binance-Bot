@@ -1,34 +1,25 @@
 #!/usr/bin/env python3
-"""Telegram bridge: monitor the bots and place manual orders on the Binance
-FUTURES TESTNET (play money). Answers only the chat that first claims it.
+"""Telegram bridge - talks in plain language.
 
-Monitoring
-  /positions /all        every bot: open positions, today, lifetime
-  /main /reverse /hype   one bot in detail
-  /orders                resting limit orders
+You can type naturally:
+    buy 200 doge                    how are the bots doing
+    buy doge at 0.15                what's main doing
+    buy 100 doge at 0.15 sl 0.13    show positions
+    sell doge                       any pending orders
+    yes / go ahead                  no / cancel
 
-Trading  (size defaults to DEFAULT_USD when omitted)
-  /buy  SYMBOL                 market buy, default size
-  /buy  SYMBOL 250             market buy, $250
-  /buy  SYMBOL @0.15           LIMIT buy at 0.15, default size
-  /buy  SYMBOL 250 @0.15       LIMIT buy at 0.15, $250
-  /sell SYMBOL [USD] [@price]  close a position, or open a short if flat
-  /confirm                     execute the preview (expires after 60s)
-  /cancel                      drop the preview
-  /cancelorder SYMBOL [ID]     cancel resting order(s)
+Slash commands still work (/positions /buy /sell /confirm /cancel /orders).
 
-Safety
-  - only the bound chat is served; the first /start claims it
-  - every order previews first and needs an explicit /confirm
-  - symbols the bots trade are allowed but WARN loudly: the account is
-    one-way, so a manual order nets against the bot's live position
-  - manual orders carry no stop-loss, and the receipt says so
+Orders go to the Binance FUTURES TESTNET (play money). Every order previews
+first and waits for a confirmation. Only the chat that first messages the bot
+is ever served.
 """
 import json, os, re, time, hmac, hashlib, urllib.request, urllib.parse, urllib.error
 
 CONF = '/home/bots/telegram/tg.conf'
 BASE = 'https://testnet.binancefuture.com'
 MAIN_CONFIG = '/home/bots/main/config.py'
+NL = chr(10)
 
 BOTS = {
     'main':    ('/home/bots/main',    'positions_binance.json', 'trades_binance.json'),
@@ -38,9 +29,7 @@ BOTS = {
 OWNED = {'BTCUSDT': 'main bot', 'SOLUSDT': 'main bot'}
 DEFAULT_USD = 100.0
 
-NL = chr(10)
-
-# ── config / telegram ─────────────────────────────────────────────────────
+# ── config ────────────────────────────────────────────────────────────────
 def conf():
     d = {}
     if os.path.exists(CONF):
@@ -58,20 +47,18 @@ def save_conf(**kv):
 
 def tg(token, method, **params):
     url = 'https://api.telegram.org/bot' + token + '/' + method
-    data = urllib.parse.urlencode(params).encode()
-    with urllib.request.urlopen(url, data, timeout=35) as r:
+    with urllib.request.urlopen(url, urllib.parse.urlencode(params).encode(),
+                                timeout=35) as r:
         return json.loads(r.read())
 
 # ── binance ───────────────────────────────────────────────────────────────
 def keys():
     src = open(MAIN_CONFIG, encoding='utf-8').read()
-    k = re.search(r'API_KEY\s*=\s*["\']([^"\']+)', src).group(1)
-    s = re.search(r'API_SECRET\s*=\s*["\']([^"\']+)', src).group(1)
-    return k, s
+    return (re.search(r'API_KEY\s*=\s*["\']([^"\']+)', src).group(1),
+            re.search(r'API_SECRET\s*=\s*["\']([^"\']+)', src).group(1))
 
 def binance(method, path, params=None, auth=False):
-    params = dict(params or {})
-    headers = {}
+    params = dict(params or {}); headers = {}
     if auth:
         k, sec = keys()
         params['timestamp'] = int(time.time() * 1000)
@@ -80,20 +67,23 @@ def binance(method, path, params=None, auth=False):
         params['signature'] = hmac.new(sec.encode(), q.encode(),
                                        hashlib.sha256).hexdigest()
         headers['X-MBX-APIKEY'] = k
-    q = urllib.parse.urlencode(params)
-    req = urllib.request.Request(BASE + path + '?' + q, method=method,
-                                 headers=headers)
+    req = urllib.request.Request(
+        BASE + path + '?' + urllib.parse.urlencode(params),
+        method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise RuntimeError(e.read().decode()[:200])
 
-_steps, _ticks = {}, {}
+_steps, _ticks, _syms = {}, {}, set()
 def _load_filters():
     if _steps:
         return
     for s in binance('GET', '/fapi/v1/exchangeInfo').get('symbols', []):
+        if s.get('status') != 'TRADING':
+            continue
+        _syms.add(s['symbol'])
         for f in s.get('filters', []):
             if f['filterType'] == 'LOT_SIZE':
                 _steps[s['symbol']] = float(f['stepSize'])
@@ -104,15 +94,13 @@ def _prec(x):
     xs = ('%f' % x).rstrip('0')
     return len(xs.split('.')[-1]) if '.' in xs else 0
 
-def round_qty(sym, qty):
-    _load_filters()
-    stp = _steps.get(sym, 0.001)
-    return round((qty // stp) * stp, _prec(stp))
+def round_qty(sym, q):
+    _load_filters(); st = _steps.get(sym, 0.001)
+    return round((q // st) * st, _prec(st))
 
-def round_price(sym, px):
-    _load_filters()
-    tk = _ticks.get(sym, 0.01)
-    return round(round(px / tk) * tk, _prec(tk))
+def round_price(sym, p):
+    _load_filters(); tk = _ticks.get(sym, 0.01)
+    return round(round(p / tk) * tk, _prec(tk))
 
 def mark(sym):
     return float(binance('GET', '/fapi/v1/ticker/price', {'symbol': sym})['price'])
@@ -122,6 +110,15 @@ def my_position(sym):
         if p['symbol'] == sym and abs(float(p.get('positionAmt', 0))) > 1e-9:
             return float(p['positionAmt']), float(p['entryPrice'])
     return 0.0, 0.0
+
+def resolve_symbol(word):
+    """'doge' -> DOGEUSDT. Accepts full symbols, bare bases, 1000-prefixed."""
+    w = word.upper().strip()
+    _load_filters()
+    for cand in (w, w + 'USDT', w + 'USDC', '1000' + w + 'USDT'):
+        if cand in _syms:
+            return cand
+    return None
 
 # ── monitoring ────────────────────────────────────────────────────────────
 def jload(p):
@@ -133,109 +130,107 @@ def jload(p):
 def fmt_bot(label):
     d, posf, trf = BOTS[label]
     if not os.path.isdir(d):
-        return label.upper() + ': not deployed on this server'
+        return label.upper() + ': not running here'
     pos = jload(os.path.join(d, posf)).get('positions', {})
     tr = jload(os.path.join(d, trf))
-    trades = tr.get('trades', [])
     today = time.strftime('%Y-%m-%d')
-    tt = [t for t in trades if t.get('close_date') == today]
-    out = ['- ' + label.upper() + ' -']
+    tt = [t for t in tr.get('trades', []) if t.get('close_date') == today]
+    out = ['*' + label.upper() + '*']
     if pos:
         for s, p in pos.items():
-            out.append('  %s %s %+.2f%% ($%+.2f) e:%g' % (
-                s, str(p.get('direction', '?')).upper(),
-                p.get('pnl_pct', 0), p.get('pnl_usd', 0), p.get('entry', 0)))
+            emo = '🟢' if p.get('pnl_usd', 0) >= 0 else '🔴'
+            out.append('%s %s %s  %+.2f%%  $%+.2f' % (
+                emo, s, str(p.get('direction', '')).upper(),
+                p.get('pnl_pct', 0), p.get('pnl_usd', 0)))
     else:
-        out.append('  no open positions')
-    out.append('  today: %d closed, $%+.2f | total: %dW/%dL $%+.2f' % (
-        len(tt), sum(t.get('pnl_usd', 0) for t in tt),
+        out.append('   no open positions')
+    out.append('   today: %d closed, $%+.2f' % (
+        len(tt), sum(t.get('pnl_usd', 0) for t in tt)))
+    out.append('   all time: %dW/%dL  $%+.2f' % (
         tr.get('wins', 0), tr.get('losses', 0), tr.get('total_pnl', 0)))
     return NL.join(out)
+
+def all_bots():
+    return (NL + NL).join(fmt_bot(b) for b in BOTS)
 
 # ── trading ───────────────────────────────────────────────────────────────
 PENDING = {}
 
-def guard_symbol(sym):
-    """(fatal, warning). Bot symbols warn rather than block: it is the user's
-    own testnet account and the preview states the consequence."""
-    if not (sym.endswith('USDT') or sym.endswith('USDC')):
-        return 'Only USDT/USDC perpetual symbols exist on this venue.', None
+def guard(sym):
     if sym in OWNED:
-        return None, ('WARNING: %s is traded by the %s. One-way mode means '
-                      'this order NETS against its live position - that book '
-                      'will desync until it reconciles.' % (sym, OWNED[sym]))
+        return ('⚠️ Heads up: %s is traded by the %s. This order will net '
+                'against its live position and desync its book.' % (sym, OWNED[sym]))
     if sym.endswith('USDC'):
-        return None, ('WARNING: USDC pairs are the reverse bot universe. This '
-                      'may net against a position it holds.')
-    return None, None
+        return '⚠️ Heads up: USDC pairs belong to the reverse bot.'
+    return None
 
-def _preview(chat, action, sym, side, qty, px, limit, warn, extra=''):
+def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
     PENDING[chat] = dict(action=action, sym=sym, side=side, qty=qty,
-                         limit=limit, ts=time.time())
-    kind = ('LIMIT @ %g' % limit) if limit else ('MARKET (~%g)' % px)
-    lines = ['PREVIEW - %s %s' % (action, sym),
-             '  qty %g   %s   ~$%s' % (qty, kind, format(qty * (limit or px), ',.2f')),
-             '  venue: FUTURES TESTNET, no stop-loss attached']
+                         limit=limit, sl=sl, ts=time.time())
+    kind = ('limit @ %g' % limit) if limit else ('market, now ~%g' % px)
+    lines = ['📋 *%s %s*' % (action, sym),
+             '   %g units, %s' % (qty, kind),
+             '   ≈ $%s' % format(qty * (limit or px), ',.2f')]
+    if sl:
+        risk = abs((limit or px) - sl) * qty
+        lines.append('   🛑 stop-loss %g  (risk ≈ $%s)' % (sl, format(risk, ',.2f')))
+    else:
+        lines.append('   ⚠️ no stop-loss')
     if extra:
-        lines.append('  ' + extra)
+        lines.append('   ' + extra)
     if warn:
-        lines.append('')
-        lines.append(warn)
-    lines.append('')
-    lines.append('Reply /confirm within 60s, or /cancel.')
+        lines += ['', warn]
+    lines += ['', 'Reply *yes* to place it, *no* to cancel.']
     return NL.join(lines)
 
-def cmd_buy(chat, sym, usd=None, limit=None):
-    err, warn = guard_symbol(sym)
-    if err:
-        return err
+def do_buy(chat, sym, usd=None, limit=None, sl=None):
     usd = DEFAULT_USD if usd is None else usd
     try:
         px = mark(sym)
-        if limit:
-            limit = round_price(sym, limit)
+        if limit: limit = round_price(sym, limit)
+        if sl:    sl    = round_price(sym, sl)
         qty = round_qty(sym, usd / (limit or px))
     except Exception as e:
-        return 'Could not price %s: %s' % (sym, e)
+        return "Couldn't price %s: %s" % (sym, e)
     if qty <= 0:
-        return '$%g is below the minimum lot for %s.' % (usd, sym)
+        return '$%g is too small for %s (below the minimum lot).' % (usd, sym)
+    if sl and sl >= (limit or px):
+        return ('That stop (%g) is above the entry (%g) — for a buy it has to '
+                'be below.' % (sl, limit or px))
     extra = ''
     if limit:
-        extra = 'mark is %g - your limit sits %s it' % (
-            px, 'below' if limit < px else 'above')
-    return _preview(chat, 'BUY', sym, 'BUY', qty, px, limit, warn, extra)
+        extra = 'market is %g, so this waits %s' % (
+            px, 'for a dip' if limit < px else 'for a rise')
+    return preview(chat, 'BUY', sym, 'BUY', qty, px, limit, sl, guard(sym), extra)
 
-def cmd_sell(chat, sym, usd=None, limit=None):
-    err, warn = guard_symbol(sym)
-    if err:
-        return err
+def do_sell(chat, sym, usd=None, limit=None, sl=None):
     try:
         amt, entry = my_position(sym)
         px = mark(sym)
     except Exception as e:
         return 'Position check failed: %s' % e
-    if limit:
-        limit = round_price(sym, limit)
+    if limit: limit = round_price(sym, limit)
     if abs(amt) > 1e-9:
         side = 'SELL' if amt > 0 else 'BUY'
-        qty = abs(amt) if usd is None else min(abs(amt),
-                                               round_qty(sym, usd / (limit or px)))
-        extra = '%s %g @ e:%g, now %g  (P&L ~$%+.2f)' % (
-            'long' if amt > 0 else 'short', abs(amt), entry, px, (px - entry) * amt)
-        return _preview(chat, 'CLOSE', sym, side, qty, px, limit, warn, extra)
+        qty = abs(amt) if usd is None else min(abs(amt), round_qty(sym, usd / (limit or px)))
+        extra = 'closing %s %g from %g — P&L ≈ $%+.2f' % (
+            'long' if amt > 0 else 'short', abs(amt), entry, (px - entry) * amt)
+        return preview(chat, 'CLOSE', sym, side, qty, px, limit, None,
+                       guard(sym), extra)
     usd = DEFAULT_USD if usd is None else usd
     qty = round_qty(sym, usd / (limit or px))
     if qty <= 0:
-        return '$%g is below the minimum lot for %s.' % (usd, sym)
-    return _preview(chat, 'SHORT', sym, 'SELL', qty, px, limit, warn,
-                    'no existing position - this OPENS a short')
+        return '$%g is too small for %s.' % (usd, sym)
+    if sl: sl = round_price(sym, sl)
+    return preview(chat, 'SHORT', sym, 'SELL', qty, px, limit, sl, guard(sym),
+                   "you don't hold this — so this OPENS a short")
 
-def cmd_confirm(chat):
+def do_confirm(chat):
     p = PENDING.pop(chat, None)
     if not p:
-        return 'Nothing pending. /buy or /sell first.'
-    if time.time() - p['ts'] > 60:
-        return 'Pending order expired (60s). Start again.'
+        return "Nothing waiting. Tell me what to buy or sell first."
+    if time.time() - p['ts'] > 90:
+        return 'That preview expired. Ask me again.'
     params = {'symbol': p['sym'], 'side': p['side'], 'quantity': p['qty']}
     if p['limit']:
         params.update({'type': 'LIMIT', 'price': p['limit'], 'timeInForce': 'GTC'})
@@ -246,113 +241,175 @@ def cmd_confirm(chat):
     try:
         r = binance('POST', '/fapi/v1/order', params, auth=True)
     except Exception as e:
-        return 'Order REJECTED by exchange: %s' % e
-    kind = 'Resting LIMIT' if p['limit'] else 'Filled MARKET'
-    msg = '%s order placed: %s %s qty %g%s (#%s)' % (
-        kind, p['action'], p['sym'], p['qty'],
-        (' @ %g' % p['limit']) if p['limit'] else '', r.get('orderId'))
-    if p['action'] in ('BUY', 'SHORT'):
-        msg += NL + 'NOTE: no stop-loss - unmanaged until you close it.'
-    return msg
+        return '❌ Exchange rejected it: %s' % e
+    msg = ['✅ %s %s — %g units%s (order #%s)' % (
+        'Placed' if p['limit'] else 'Filled', p['sym'], p['qty'],
+        (' @ %g' % p['limit']) if p['limit'] else '', r.get('orderId'))]
+    # attach the stop-loss as a separate reduce-only STOP_MARKET
+    if p.get('sl') and p['action'] in ('BUY', 'SHORT'):
+        try:
+            close_side = 'SELL' if p['side'] == 'BUY' else 'BUY'
+            s = binance('POST', '/fapi/v1/order', {
+                'symbol': p['sym'], 'side': close_side, 'type': 'STOP_MARKET',
+                'stopPrice': p['sl'], 'closePosition': 'true'}, auth=True)
+            msg.append('🛑 Stop-loss set at %g (#%s)' % (p['sl'], s.get('orderId')))
+        except Exception as e:
+            msg.append('⚠️ Order went through but the STOP-LOSS FAILED: %s' % e)
+            msg.append('   The position is unprotected — set it manually.')
+    elif p['action'] in ('BUY', 'SHORT'):
+        msg.append('⚠️ No stop-loss — this runs until you close it.')
+    return NL.join(msg)
 
-def cmd_orders():
+def do_orders():
     try:
         o = binance('GET', '/fapi/v1/openOrders', auth=True)
     except Exception as e:
-        return 'Could not list orders: %s' % e
+        return "Couldn't fetch orders: %s" % e
     if not o:
-        return 'No resting orders.'
-    out = ['Resting orders:']
+        return 'No pending orders.'
+    out = ['*Pending orders*']
     for x in o:
-        out.append('  #%s %s %s %s qty %s @ %s' % (
+        out.append('   #%s %s %s %s %s @ %s' % (
             x['orderId'], x['symbol'], x['side'], x['type'],
-            x['origQty'], x.get('price', '-')))
+            x['origQty'], x.get('stopPrice') or x.get('price') or '-'))
     out.append('')
-    out.append('/cancelorder SYMBOL [ID]')
+    out.append('Say "cancel orders on doge" to clear one.')
     return NL.join(out)
 
-def cmd_cancel_order(sym, oid=None):
+def do_cancel_orders(sym):
     try:
-        if oid:
-            binance('DELETE', '/fapi/v1/order',
-                    {'symbol': sym, 'orderId': oid}, auth=True)
-            return 'Cancelled #%s on %s.' % (oid, sym)
         binance('DELETE', '/fapi/v1/allOpenOrders', {'symbol': sym}, auth=True)
-        return 'Cancelled all resting orders on %s.' % sym
+        return 'Cleared all pending orders on %s.' % sym
     except Exception as e:
         return 'Cancel failed: %s' % e
 
+# ── natural language ──────────────────────────────────────────────────────
+YES = {'yes', 'y', 'yeah', 'yep', 'ok', 'okay', 'go', 'go ahead', 'do it',
+       'confirm', 'sure', 'proceed', 'send it', 'buy it', 'sell it', 'correct'}
+NO  = {'no', 'n', 'nope', 'cancel', 'stop', 'abort', 'nevermind', 'never mind',
+       'dont', "don't", 'wait'}
+
+NUM = r'(\d+(?:\.\d+)?)'
+
+def parse(chat, text):
+    t = ' '.join((text or '').lower().split())
+    if not t:
+        return None
+    bare = t.lstrip('/')
+
+    if bare in YES or t in YES:
+        return do_confirm(chat)
+    if bare in NO or t in NO:
+        return 'Cancelled.' if PENDING.pop(chat, None) else 'Nothing to cancel.'
+    if bare in ('start', 'help', 'commands') or 'what can you do' in t:
+        return HELP
+
+    # status questions
+    if re.search(r'\b(order|pending)s?\b', t) and not re.search(r'\b(buy|sell)\b', t):
+        m = re.search(r'cancel.*\bon\s+([a-z0-9]+)', t)
+        if m or 'cancel' in t:
+            w = (m.group(1) if m else '')
+            sym = resolve_symbol(w) if w else None
+            if sym: return do_cancel_orders(sym)
+        return do_orders()
+    for name in BOTS:
+        if re.search(r'\b' + name + r'\b', t):
+            return fmt_bot(name)
+    if re.search(r'\b(position|status|doing|pnl|p&l|profit|balance|how are|'
+                 r'summary|report|show|update)\b', t):
+        return all_bots()
+
+    # trading intent
+    sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)\b', t))
+    buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter|get)\b', t))
+    if not (buy or sell):
+        return None
+
+    usd = None
+    m = re.search(r'(?:\$|usd\s*)' + NUM, t) or re.search(NUM + r'\s*(?:usd|dollar)', t)
+    if m: usd = float(m.group(1))
+
+    limit = None
+    m = re.search(r'(?:@|\bat\b|\bwhen it hits\b|\bprice\b)\s*' + NUM, t)
+    if m: limit = float(m.group(1))
+
+    sl = None
+    m = re.search(r'\b(?:sl|stop(?:\s*loss)?)\b\s*(?:at\s*)?' + NUM, t)
+    if m: sl = float(m.group(1))
+
+    # symbol: try every word, skipping ones already consumed as numbers
+    used = {str(x) for x in (usd, limit, sl) if x is not None}
+    sym = None
+    for w in re.findall(r'[a-z0-9]+', t):
+        if w in used or w.isdigit():
+            continue
+        if w in ('buy', 'sell', 'close', 'long', 'short', 'at', 'sl', 'stop',
+                 'loss', 'usd', 'dollar', 'dollars', 'of', 'worth', 'the',
+                 'exit', 'dump', 'get', 'me', 'please', 'and', 'with', 'a'):
+            continue
+        sym = resolve_symbol(w)
+        if sym:
+            break
+    if not sym:
+        return ("I couldn't work out which coin you mean. Try something like "
+                '"buy 200 doge" or "sell btc".')
+
+    # a bare number with no $ is treated as the size
+    if usd is None:
+        for n in re.findall(NUM, t):
+            if limit is not None and float(n) == limit: continue
+            if sl is not None and float(n) == sl: continue
+            usd = float(n); break
+
+    return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl)
+
 HELP = NL.join([
-    'Monitor:',
-    '/positions /all - every bot',
-    '/main /reverse /hype - one bot',
-    '/orders - resting limit orders',
+    '👋 Talk to me normally. Examples:',
     '',
-    'Trade (futures TESTNET, default $%g):' % DEFAULT_USD,
-    '/buy SYMBOL            market, default size',
-    '/buy SYMBOL 250        market, $250',
-    '/buy SYMBOL @0.15      limit at 0.15',
-    '/buy SYMBOL 250 @0.15  limit, $250',
-    '/sell SYMBOL [USD] [@price]',
-    '/confirm  /cancel',
-    '/cancelorder SYMBOL [ID]',
+    '*Checking in*',
+    '   how are the bots doing',
+    '   show positions',
+    "   what's main doing",
+    '   any pending orders',
+    '',
+    '*Trading* (futures testnet, default $%g)' % DEFAULT_USD,
+    '   buy 200 doge',
+    '   buy doge at 0.15',
+    '   buy 100 doge at 0.15 sl 0.13',
+    '   sell doge',
+    '   cancel orders on doge',
+    '',
+    'I always show a preview first — reply *yes* to place it, *no* to cancel.',
 ])
 
-ARG = re.compile(r'^/(buy|sell)\s+([A-Za-z0-9]+)'
-                 r'(?:\s+(\d+(?:\.\d+)?))?'
-                 r'(?:\s*@\s*(\d+(?:\.\d+)?))?\s*$', re.I)
-
 def handle(chat, text):
-    t = (text or '').strip()
-    low = t.lower()
-    if low in ('/start', '/help'):
-        return HELP
-    if low in ('/positions', '/all'):
-        return (NL + NL).join(fmt_bot(b) for b in BOTS)
-    if low.lstrip('/') in BOTS:
-        return fmt_bot(low.lstrip('/'))
-    if low == '/orders':
-        return cmd_orders()
-    if low == '/confirm':
-        return cmd_confirm(chat)
-    if low == '/cancel':
-        return 'Cancelled.' if PENDING.pop(chat, None) else 'Nothing pending.'
-    m = re.match(r'^/cancelorder\s+([A-Za-z0-9]+)(?:\s+(\d+))?$', t, re.I)
-    if m:
-        return cmd_cancel_order(m.group(1).upper(), m.group(2))
-    m = ARG.match(t)
-    if m:
-        cmd, sym = m.group(1).lower(), m.group(2).upper()
-        usd = float(m.group(3)) if m.group(3) else None
-        lim = float(m.group(4)) if m.group(4) else None
-        return (cmd_buy if cmd == 'buy' else cmd_sell)(chat, sym, usd, lim)
-    return 'Unknown command. /help for the list.'
+    try:
+        r = parse(chat, text)
+    except Exception as e:
+        return 'Something went wrong: %s' % e
+    return r or ("Not sure what you meant. Try \"show positions\" or "
+                 "\"buy 100 doge\" — or say *help*.")
 
 def main():
-    print('tg_bridge waiting for token...', flush=True)
+    print('waiting for token...', flush=True)
     while True:
         token = conf().get('TOKEN', '')
-        if token:
-            break
+        if token: break
         time.sleep(30)
-    print('token found, polling', flush=True)
+    print('polling', flush=True)
     offset = 0
     while True:
         try:
-            r = tg(token, 'getUpdates', offset=offset, timeout=30)
-            for u in r.get('result', []):
+            for u in tg(token, 'getUpdates', offset=offset, timeout=30).get('result', []):
                 offset = u['update_id'] + 1
                 msg = u.get('message') or {}
                 chat = str(msg.get('chat', {}).get('id', ''))
-                if not chat:
-                    continue
+                if not chat: continue
                 bound = conf().get('CHAT', '')
                 if not bound:
-                    save_conf(CHAT=chat)
-                    bound = chat
-                if chat != bound:
-                    continue
-                tg(token, 'sendMessage', chat_id=chat,
+                    save_conf(CHAT=chat); bound = chat
+                if chat != bound: continue
+                tg(token, 'sendMessage', chat_id=chat, parse_mode='Markdown',
                    text=handle(chat, msg.get('text', ''))[:4000])
         except Exception as e:
             print('poll error: %s' % e, flush=True)
