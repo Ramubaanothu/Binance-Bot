@@ -881,6 +881,19 @@ class AlphaBot:
             orphans = [s for s in ex_map
                        if s not in self.positions
                        and _now - self._recently_closed.get(s, 0) > 180]
+            # Only ever adopt symbols this bot actually trades. The USDT wallet
+            # is shared with the Looser bot, and reconcile previously filtered
+            # on quote asset alone — so an ETHUSDT position opened by that bot
+            # would be imported here as our own, leaving both bots managing one
+            # position with competing stop orders (the SOLUSDC failure). Alt
+            # scanner is off, so CHART_SYMBOLS is the full set we can own.
+            _mine = set(getattr(config, 'CHART_SYMBOLS', []) or [])
+            if _mine and getattr(config, 'BTC_ONLY_MODE', False):
+                foreign = [s for s in orphans if s not in _mine]
+                if foreign:
+                    self.emit('warn', f"[RECONCILE] ignoring {len(foreign)} position(s) "
+                                      f"outside our symbols: {', '.join(sorted(foreign))}")
+                orphans = [s for s in orphans if s in _mine]
             imported_n = 0
             closed_n   = 0
 
