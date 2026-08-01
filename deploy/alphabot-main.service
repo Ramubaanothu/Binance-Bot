@@ -1,0 +1,23 @@
+[Unit]
+Description=AlphaBot main (USDT)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bots
+WorkingDirectory=/home/bots/main
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/bots/venv/bin/python bot.py
+
+# Always come back, no matter how it died. This is the whole point of the
+# migration: the Windows watchdog kept failing to launch and the bots ran
+# roughly 30%% of the last two weeks.
+Restart=always
+RestartSec=10
+# Do not give up after repeated crashes.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
