@@ -58,7 +58,19 @@ def keys():
     return (re.search(r'API_KEY\s*=\s*["\']([^"\']+)', src).group(1),
             re.search(r'API_SECRET\s*=\s*["\']([^"\']+)', src).group(1))
 
-def binance(method, path, params=None, auth=False):
+# Demo Trading is one account, one key, two hosts. Everything below is
+# keyed by venue so a spot order never lands on the futures book.
+SPOT_BASE = 'https://demo-api.binance.com'
+VENUE = {
+    'fut':  dict(base=BASE, ex='/fapi/v1/exchangeInfo',
+                 tick='/fapi/v1/ticker/price', order='/fapi/v1/order',
+                 open='/fapi/v1/openOrders', cancel='/fapi/v1/allOpenOrders'),
+    'spot': dict(base=SPOT_BASE, ex='/api/v3/exchangeInfo',
+                 tick='/api/v3/ticker/price', order='/api/v3/order',
+                 open='/api/v3/openOrders', cancel='/api/v3/openOrders'),
+}
+
+def binance(method, path, params=None, auth=False, venue='fut'):
     params = dict(params or {}); headers = {}
     if auth:
         k, sec = keys()
@@ -69,7 +81,7 @@ def binance(method, path, params=None, auth=False):
                                        hashlib.sha256).hexdigest()
         headers['X-MBX-APIKEY'] = k
     req = urllib.request.Request(
-        BASE + path + '?' + urllib.parse.urlencode(params),
+        VENUE[venue]['base'] + path + '?' + urllib.parse.urlencode(params),
         method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -77,47 +89,73 @@ def binance(method, path, params=None, auth=False):
     except urllib.error.HTTPError as e:
         raise RuntimeError(e.read().decode()[:200])
 
-_steps, _ticks, _syms = {}, {}, set()
-def _load_filters():
-    if _steps:
-        return
-    for s in binance('GET', '/fapi/v1/exchangeInfo').get('symbols', []):
+_F = {v: dict(steps={}, ticks={}, minnot={}, base={}, syms=set())
+      for v in ('fut', 'spot')}
+
+def _load_filters(venue='fut'):
+    c = _F[venue]
+    if c['steps']:
+        return c
+    for s in binance('GET', VENUE[venue]['ex'], venue=venue).get('symbols', []):
         if s.get('status') != 'TRADING':
             continue
-        _syms.add(s['symbol'])
+        sym = s['symbol']
+        c['syms'].add(sym)
+        c['base'][sym] = s.get('baseAsset', '')
         for f in s.get('filters', []):
             if f['filterType'] == 'LOT_SIZE':
-                _steps[s['symbol']] = float(f['stepSize'])
+                c['steps'][sym] = float(f['stepSize'])
             elif f['filterType'] == 'PRICE_FILTER':
-                _ticks[s['symbol']] = float(f['tickSize'])
+                c['ticks'][sym] = float(f['tickSize'])
+            elif f['filterType'] in ('NOTIONAL', 'MIN_NOTIONAL'):
+                c['minnot'][sym] = float(f.get('minNotional', 0) or 0)
+    return c
 
 def _prec(x):
     xs = ('%f' % x).rstrip('0')
     return len(xs.split('.')[-1]) if '.' in xs else 0
 
-def round_qty(sym, q):
-    _load_filters(); st = _steps.get(sym, 0.001)
+def round_qty(sym, q, venue='fut'):
+    st = _load_filters(venue)['steps'].get(sym, 0.001)
     return round((q // st) * st, _prec(st))
 
-def round_price(sym, p):
-    _load_filters(); tk = _ticks.get(sym, 0.01)
+def round_price(sym, p, venue='fut'):
+    tk = _load_filters(venue)['ticks'].get(sym, 0.01)
     return round(round(p / tk) * tk, _prec(tk))
 
-def mark(sym):
-    return float(binance('GET', '/fapi/v1/ticker/price', {'symbol': sym})['price'])
+def min_notional(sym, venue='fut'):
+    return _load_filters(venue)['minnot'].get(sym, 0.0)
 
-def my_position(sym):
+def mark(sym, venue='fut'):
+    return float(binance('GET', VENUE[venue]['tick'], {'symbol': sym},
+                         venue=venue)['price'])
+
+def spot_free(asset):
+    for b in binance('GET', '/api/v3/account', auth=True,
+                     venue='spot').get('balances', []):
+        if b['asset'] == asset:
+            return float(b['free'])
+    return 0.0
+
+def my_position(sym, venue='fut'):
+    """(signed qty, entry). On spot there is no short and no entry price -
+    what you hold is simply the free balance of the base asset."""
+    if venue == 'spot':
+        base = _load_filters('spot')['base'].get(sym, '')
+        return (spot_free(base) if base else 0.0), 0.0
     for p in binance('GET', '/fapi/v2/positionRisk', auth=True):
         if p['symbol'] == sym and abs(float(p.get('positionAmt', 0))) > 1e-9:
             return float(p['positionAmt']), float(p['entryPrice'])
     return 0.0, 0.0
 
-def resolve_symbol(word):
+def resolve_symbol(word, venue='fut'):
     """'doge' -> DOGEUSDT. Accepts full symbols, bare bases, 1000-prefixed."""
     w = word.upper().strip()
-    _load_filters()
-    for cand in (w, w + 'USDT', w + 'USDC', '1000' + w + 'USDT'):
-        if cand in _syms:
+    syms = _load_filters(venue)['syms']
+    cands = ((w, w + 'USDT', w + 'USDC') if venue == 'spot'
+             else (w, w + 'USDT', w + 'USDC', '1000' + w + 'USDT'))
+    for cand in cands:
+        if cand in syms:
             return cand
     return None
 
@@ -226,7 +264,11 @@ def all_bots():
 # ── trading ───────────────────────────────────────────────────────────────
 PENDING = {}
 
-def guard(sym):
+def guard(sym, venue='fut'):
+    if venue == 'spot':
+        # the bots are all futures (hype trades on paper), so nothing of
+        # theirs can be netted against by a spot order
+        return None
     if sym in OWNED:
         return ('⚠️ Heads up: %s is traded by the %s. This order will net '
                 'against its live position and desync its book.' % (sym, OWNED[sym]))
@@ -235,11 +277,12 @@ def guard(sym):
     return None
 
 def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra='',
-            ambiguous=None):
+            ambiguous=None, venue='fut'):
     PENDING[chat] = dict(action=action, sym=sym, side=side, qty=qty,
-                         limit=limit, sl=sl, ts=time.time())
+                         limit=limit, sl=sl, ts=time.time(), venue=venue)
     kind = ('limit @ %g' % limit) if limit else ('market, now ~%g' % px)
-    lines = ['📋 *%s %s*' % (action, sym),
+    lines = ['📋 *%s %s*  _%s_' % (action, sym,
+                                  'SPOT' if venue == 'spot' else 'perp'),
              '   *%g units*, %s' % (qty, kind),
              '   ≈ $%s' % format(qty * (limit or px), ',.2f')]
     if sl:
@@ -260,22 +303,35 @@ def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra='',
     return NL.join(lines)
 
 def do_buy(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
-           ambiguous=False):
+           ambiguous=False, venue='fut'):
     if qty_units is None and usd is None:
         usd = DEFAULT_USD
     try:
-        px = mark(sym)
-        if limit: limit = round_price(sym, limit)
-        if sl:    sl    = round_price(sym, sl)
+        px = mark(sym, venue)
+        if limit: limit = round_price(sym, limit, venue)
+        if sl:    sl    = round_price(sym, sl, venue)
         # explicit units win over a dollar amount
-        qty = (round_qty(sym, qty_units) if qty_units is not None
-               else round_qty(sym, usd / (limit or px)))
+        qty = (round_qty(sym, qty_units, venue) if qty_units is not None
+               else round_qty(sym, usd / (limit or px), venue))
     except Exception as e:
         return "Couldn't price %s: %s" % (sym, e)
     if qty <= 0:
         if qty_units is not None:
             return ('%g units is below the minimum lot for %s.' % (qty_units, sym))
         return '$%g is too small for %s (below the minimum lot).' % (usd, sym)
+    # spot enforces a notional floor and rejects the order outright
+    mn = min_notional(sym, venue)
+    if mn and qty * (limit or px) < mn:
+        return ('%s needs at least $%g per order — %g units is only $%.2f. '
+                'Try a bigger size.' % (sym, mn, qty, qty * (limit or px)))
+    if venue == 'spot':
+        cash = spot_free(sym[:-4] if sym.endswith(('USDT', 'USDC')) else '')
+        quote = 'USDC' if sym.endswith('USDC') else 'USDT'
+        have = spot_free(quote)
+        need = qty * (limit or px)
+        if need > have:
+            return ('Not enough %s on the spot wallet: need $%.2f, have $%.2f.'
+                    % (quote, need, have))
     if sl and sl >= (limit or px):
         return ('That stop (%g) is above the entry (%g) — for a buy it has to '
                 'be below.' % (sl, limit or px))
@@ -283,29 +339,42 @@ def do_buy(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
     if limit:
         extra = 'market is %g, so this waits %s' % (
             px, 'for a dip' if limit < px else 'for a rise')
-    return preview(chat, 'BUY', sym, 'BUY', qty, px, limit, sl, guard(sym), extra,
-                   ambiguous=(usd if ambiguous else None))
+    return preview(chat, 'BUY', sym, 'BUY', qty, px, limit, sl,
+                   guard(sym, venue), extra,
+                   ambiguous=(usd if ambiguous else None), venue=venue)
 
 def do_sell(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
-            ambiguous=False):
+            ambiguous=False, venue='fut'):
     try:
-        amt, entry = my_position(sym)
-        px = mark(sym)
+        amt, entry = my_position(sym, venue)
+        px = mark(sym, venue)
     except Exception as e:
         return 'Position check failed: %s' % e
-    if limit: limit = round_price(sym, limit)
+    if limit: limit = round_price(sym, limit, venue)
     if abs(amt) > 1e-9:
         side = 'SELL' if amt > 0 else 'BUY'
         if qty_units is not None:
-            qty = min(abs(amt), round_qty(sym, qty_units))
+            qty = min(abs(amt), round_qty(sym, qty_units, venue))
         elif usd is not None:
-            qty = min(abs(amt), round_qty(sym, usd / (limit or px)))
+            qty = min(abs(amt), round_qty(sym, usd / (limit or px), venue))
         else:
-            qty = abs(amt)
-        extra = 'closing %s %g from %g — P&L ≈ $%+.2f' % (
-            'long' if amt > 0 else 'short', abs(amt), entry, (px - entry) * amt)
+            qty = round_qty(sym, abs(amt), venue)
+        if venue == 'spot':
+            extra = 'selling %g of %g held' % (qty, abs(amt))
+        else:
+            extra = 'closing %s %g from %g — P&L ≈ $%+.2f' % (
+                'long' if amt > 0 else 'short', abs(amt), entry,
+                (px - entry) * amt)
         return preview(chat, 'CLOSE', sym, side, qty, px, limit, None,
-                       guard(sym), extra)
+                       guard(sym, venue), extra, venue=venue)
+    if venue == 'spot':
+        # spot cannot short. Saying 'sell' with an empty wallet is far more
+        # likely a mistake than a request to open one on the perp book.
+        base = _load_filters('spot')['base'].get(sym, sym)
+        return ('You hold no %s on the spot wallet, and spot has no shorting '
+                '— you can only sell what you own.%s'
+                'To short it, drop the word "spot": `sell %s`.'
+                % (base, NL + NL, sym))
     usd = DEFAULT_USD if usd is None else usd
     qty = round_qty(sym, usd / (limit or px))
     if qty <= 0:
@@ -322,15 +391,17 @@ def do_confirm(chat):
         return "Nothing waiting. Tell me what to buy or sell first."
     if time.time() - p['ts'] > 90:
         return 'That preview expired. Ask me again.'
+    v = p.get('venue', 'fut')
     params = {'symbol': p['sym'], 'side': p['side'], 'quantity': p['qty']}
     if p['limit']:
         params.update({'type': 'LIMIT', 'price': p['limit'], 'timeInForce': 'GTC'})
     else:
         params['type'] = 'MARKET'
-    if p['action'] == 'CLOSE':
+    # reduceOnly is a futures concept - spot rejects the parameter
+    if p['action'] == 'CLOSE' and v == 'fut':
         params['reduceOnly'] = 'true'
     try:
-        r = binance('POST', '/fapi/v1/order', params, auth=True)
+        r = binance('POST', VENUE[v]['order'], params, auth=True, venue=v)
     except Exception as e:
         return '❌ Exchange rejected it: %s' % e
     msg = ['✅ %s %s — %g units%s (order #%s)' % (
@@ -340,9 +411,14 @@ def do_confirm(chat):
     if p.get('sl') and p['action'] in ('BUY', 'SHORT'):
         try:
             close_side = 'SELL' if p['side'] == 'BUY' else 'BUY'
-            s = binance('POST', '/fapi/v1/order', {
-                'symbol': p['sym'], 'side': close_side, 'type': 'STOP_MARKET',
-                'stopPrice': p['sl'], 'closePosition': 'true'}, auth=True)
+            # spot has no closePosition/STOP_MARKET - it needs an explicit
+            # quantity on a STOP_LOSS order
+            sp = ({'symbol': p['sym'], 'side': close_side, 'type': 'STOP_LOSS',
+                   'stopPrice': p['sl'], 'quantity': p['qty']} if v == 'spot'
+                  else {'symbol': p['sym'], 'side': close_side,
+                        'type': 'STOP_MARKET', 'stopPrice': p['sl'],
+                        'closePosition': 'true'})
+            s = binance('POST', VENUE[v]['order'], sp, auth=True, venue=v)
             msg.append('🛑 Stop-loss set at %g (#%s)' % (p['sl'], s.get('orderId')))
         except Exception as e:
             msg.append('⚠️ Order went through but the STOP-LOSS FAILED: %s' % e)
@@ -351,14 +427,14 @@ def do_confirm(chat):
         msg.append('⚠️ No stop-loss — this runs until you close it.')
     return NL.join(msg)
 
-def do_orders():
+def do_orders(venue='fut'):
     try:
-        o = binance('GET', '/fapi/v1/openOrders', auth=True)
+        o = binance('GET', VENUE[venue]['open'], auth=True, venue=venue)
     except Exception as e:
         return "Couldn't fetch orders: %s" % e
     if not o:
-        return 'No pending orders.'
-    out = ['*Pending orders*']
+        return 'No pending %s orders.' % ('spot' if venue == 'spot' else 'perp')
+    out = ['*Pending %s orders*' % ('spot' if venue == 'spot' else 'perp')]
     for x in o:
         out.append('   #%s %s %s %s %s @ %s' % (
             x['orderId'], x['symbol'], x['side'], x['type'],
@@ -367,9 +443,10 @@ def do_orders():
     out.append('Say "cancel orders on doge" to clear one.')
     return NL.join(out)
 
-def do_cancel_orders(sym):
+def do_cancel_orders(sym, venue='fut'):
     try:
-        binance('DELETE', '/fapi/v1/allOpenOrders', {'symbol': sym}, auth=True)
+        binance('DELETE', VENUE[venue]['cancel'], {'symbol': sym}, auth=True,
+                venue=venue)
         return 'Cleared all pending orders on %s.' % sym
     except Exception as e:
         return 'Cancel failed: %s' % e
@@ -530,20 +607,24 @@ def venue_info():
     return NL.join([
         '\U0001F4CD *What you are trading here*',
         '',
-        'Orders I place go to *Binance FUTURES testnet* - USDT-margined',
-        '*perpetuals*, not spot. Play money.',
+        'Binance *Demo Trading* - one account, one API key, two books.',
+        'Play money on both.',
         '',
+        '*PERPETUALS* (the default)',
         '   \u2022 buy = open a LONG perp',
         '   \u2022 sell = close it, or open a SHORT if you are flat',
-        '   \u2022 leverage is whatever the account is set to per symbol',
+        '   \u2022 leveraged, funded in USDT / USDC',
+        '   \u2022 say _buy 200 sol_',
+        '',
+        '*SPOT* - say the word "spot" and it routes there',
+        '   \u2022 buy = you own the coin outright, no leverage',
+        '   \u2022 sell = sell what you hold. There is NO shorting',
+        '   \u2022 say _spot buy 200 sol_ or _spot wallet_',
         '',
         '*The bots:*',
-        '   main / reverse - futures perps, live testnet fills',
-        '   hype - SPOT prices, simulated fills (spot testnet needs its',
-        '   own API key, which the futures key cannot access)',
-        '',
-        '_Spot and futures testnets are separate registrations at Binance,_',
-        '_which is why the hype book is still paper._',
+        '   main / reverse - perps, live demo fills',
+        '   hype - spot prices, simulated fills (paper by choice, not',
+        '   by limitation)',
     ])
 
 def trade_report():
@@ -610,6 +691,39 @@ def today_summary():
         head += NL + '   Quiet so far. Nothing has closed yet.'
     return NL.join([head, ''] + per)
 
+def spot_wallet():
+    """What is actually sitting in the spot demo wallet."""
+    try:
+        a = binance('GET', '/api/v3/account', auth=True, venue='spot')
+    except Exception as e:
+        return "Couldn't reach the spot wallet: %s" % e
+    held = [b for b in a.get('balances', [])
+            if float(b['free']) + float(b['locked']) > 0]
+    cash = [b for b in held if b['asset'] in ('USDT', 'USDC')]
+    coins = [b for b in held if b['asset'] not in ('USDT', 'USDC')]
+    out = ['\U0001F4B0 *Spot wallet*  _demo_']
+    for b in cash:
+        out.append('   %-6s $%s free' % (b['asset'],
+                                         format(float(b['free']), ',.2f')))
+    if coins:
+        out.append('')
+        out.append('*Holdings*')
+        for b in sorted(coins, key=lambda x: x['asset']):
+            q = float(b['free']) + float(b['locked'])
+            try:
+                val = ' ≈ $%s' % format(
+                    q * mark(b['asset'] + 'USDT', 'spot'), ',.2f')
+            except Exception:
+                val = ''
+            out.append('   %-6s %g%s' % (b['asset'], q, val))
+    else:
+        out.append('')
+        out.append('   No coins held — cash only.')
+    out.append('')
+    out.append('_Say_ `spot buy 200 sol` _to trade here. '
+               'This wallet is separate from the perp bots._')
+    return NL.join(out)
+
 # ── natural language ──────────────────────────────────────────────────────
 YES = {'yes', 'y', 'yeah', 'yep', 'ok', 'okay', 'go', 'go ahead', 'do it',
        'confirm', 'sure', 'proceed', 'send it', 'buy it', 'sell it', 'correct'}
@@ -652,10 +766,12 @@ def parse(chat, text):
                 '_Open positions are reconciled from the exchange on boot._' +
                 NL + NL + 'Reply *yes* to go ahead.')
 
-    # what market am I trading?
+    # what market am I trading? Only the bare question — "spot wallet" and
+    # "spot orders" are requests for data and are handled further down.
     if re.search(r'\b(perp|perpetual|futures|spot|margin|leverage|'
                  r'what market|which market|what am i trading)', t) \
-            and not re.search(r'\b(buy|sell)\b', t):
+            and not re.search(r'\b(buy|sell|wallet|balance|holding|order|'
+                              r'pending|position|account|cancel)', t):
         return venue_info()
 
     # full performance report
@@ -673,18 +789,26 @@ def parse(chat, text):
 
     # status questions
     if re.search(r'\b(order|pending)s?\b', t) and not re.search(r'\b(buy|sell)\b', t):
+        v = 'spot' if re.search(r'\bspot\b', t) else 'fut'
         m = re.search(r'cancel.*\bon\s+([a-z0-9]+)', t)
         if m or 'cancel' in t:
             w = (m.group(1) if m else '')
-            sym = resolve_symbol(w) if w else None
-            if sym: return do_cancel_orders(sym)
-        return do_orders()
+            sym = resolve_symbol(w, v) if w else None
+            if sym: return do_cancel_orders(sym, v)
+        return do_orders(v)
     for name in BOTS:
         if re.search(r'\b' + name + r'\b', t):
             return fmt_bot(name)
+    if re.search(r'\bspot\b', t) and re.search(
+            r'\b(wallet|balance|holding|position|account|what.*hold)', t):
+        return spot_wallet()
     if re.search(r'\b(position|status|doing|pnl|p&l|profit|balance|how are|'
                  r'summary|report|show|update)', t):
         return all_bots()
+
+    # Which book? Demo Trading is one account on two hosts, so the only
+    # thing that decides this is the wording.
+    venue = 'spot' if re.search(r'\bspot\b', t) else 'fut'
 
     # trading intent
     sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)', t))
@@ -765,9 +889,11 @@ def parse(chat, text):
             continue
         if w in ('buy', 'sell', 'close', 'long', 'short', 'at', 'sl', 'stop',
                  'loss', 'usd', 'dollar', 'dollars', 'of', 'worth', 'the',
-                 'exit', 'dump', 'get', 'me', 'please', 'and', 'with', 'a'):
+                 'exit', 'dump', 'get', 'me', 'please', 'and', 'with', 'a',
+                 'spot', 'perp', 'perpetual', 'futures', 'future', 'qty',
+                 'units', 'unit', 'coins', 'market', 'order', 'now'):
             continue
-        sym = resolve_symbol(w)
+        sym = resolve_symbol(w, venue)
         if sym:
             break
     if not sym:
@@ -788,12 +914,8 @@ def parse(chat, text):
             ambiguous = True
             break
 
-    r = (do_sell if sell else do_buy)(chat, sym, usd, limit, sl,
-                                      qty_units, ambiguous)
-    if 'spot' in t:
-        r += (NL + NL + '_Note: this places a FUTURES order. Spot trading is '
-              'not wired in here - the spot testnet needs its own API key._')
-    return r
+    return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl,
+                                         qty_units, ambiguous, venue)
 
 HELP = NL.join([
     '👋 Talk to me normally. Examples:',
@@ -805,12 +927,18 @@ HELP = NL.join([
     '   any pending orders',
     '   server status',
     '',
-    '*Trading* (futures testnet, default $%g)' % DEFAULT_USD,
+    '*Trading perps* (the default, $%g if you name no size)' % DEFAULT_USD,
     '   buy 200 doge',
     '   buy doge at 0.15',
     '   buy 100 doge at 0.15 sl 0.13',
+    '   buy 5 qty sol          _units, not dollars_',
     '   sell doge',
     '   cancel orders on doge',
+    '',
+    '*Trading spot* — just say "spot"',
+    '   spot buy 200 sol',
+    '   spot sell sol',
+    '   spot wallet',
     '',
     'I always show a preview first — reply *yes* to place it, *no* to cancel.',
 ])
