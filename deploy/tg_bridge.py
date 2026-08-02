@@ -148,8 +148,10 @@ def fmt_bot(label):
     today = time.strftime('%Y-%m-%d')
     tt = [t for t in tr.get('trades', []) if t.get('close_date') == today]
     paper = is_paper(d)
-    out = ['*' + label.upper() + ('*  📄 _paper — simulated, not on Binance_'
-                                  if paper else '*  🔴 _live_')]
+    tag = ('  📄 _paper_' if paper else '  🔴 _live_')
+    if is_paused(label):
+        tag += '  ⏸ _paused_'
+    out = ['*' + label.upper() + '*' + tag]
     if pos:
         for s, p in pos.items():
             emo = '🟢' if p.get('pnl_usd', 0) >= 0 else '🔴'
@@ -229,7 +231,7 @@ def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
                          limit=limit, sl=sl, ts=time.time())
     kind = ('limit @ %g' % limit) if limit else ('market, now ~%g' % px)
     lines = ['📋 *%s %s*' % (action, sym),
-             '   %g units, %s' % (qty, kind),
+             '   *%g units*, %s' % (qty, kind),
              '   ≈ $%s' % format(qty * (limit or px), ',.2f')]
     if sl:
         risk = abs((limit or px) - sl) * qty
@@ -243,16 +245,21 @@ def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
     lines += ['', 'Reply *yes* to place it, *no* to cancel.']
     return NL.join(lines)
 
-def do_buy(chat, sym, usd=None, limit=None, sl=None):
-    usd = DEFAULT_USD if usd is None else usd
+def do_buy(chat, sym, usd=None, limit=None, sl=None, qty_units=None):
+    if qty_units is None and usd is None:
+        usd = DEFAULT_USD
     try:
         px = mark(sym)
         if limit: limit = round_price(sym, limit)
         if sl:    sl    = round_price(sym, sl)
-        qty = round_qty(sym, usd / (limit or px))
+        # explicit units win over a dollar amount
+        qty = (round_qty(sym, qty_units) if qty_units is not None
+               else round_qty(sym, usd / (limit or px)))
     except Exception as e:
         return "Couldn't price %s: %s" % (sym, e)
     if qty <= 0:
+        if qty_units is not None:
+            return ('%g units is below the minimum lot for %s.' % (qty_units, sym))
         return '$%g is too small for %s (below the minimum lot).' % (usd, sym)
     if sl and sl >= (limit or px):
         return ('That stop (%g) is above the entry (%g) — for a buy it has to '
@@ -263,7 +270,7 @@ def do_buy(chat, sym, usd=None, limit=None, sl=None):
             px, 'for a dip' if limit < px else 'for a rise')
     return preview(chat, 'BUY', sym, 'BUY', qty, px, limit, sl, guard(sym), extra)
 
-def do_sell(chat, sym, usd=None, limit=None, sl=None):
+def do_sell(chat, sym, usd=None, limit=None, sl=None, qty_units=None):
     try:
         amt, entry = my_position(sym)
         px = mark(sym)
@@ -272,7 +279,12 @@ def do_sell(chat, sym, usd=None, limit=None, sl=None):
     if limit: limit = round_price(sym, limit)
     if abs(amt) > 1e-9:
         side = 'SELL' if amt > 0 else 'BUY'
-        qty = abs(amt) if usd is None else min(abs(amt), round_qty(sym, usd / (limit or px)))
+        if qty_units is not None:
+            qty = min(abs(amt), round_qty(sym, qty_units))
+        elif usd is not None:
+            qty = min(abs(amt), round_qty(sym, usd / (limit or px)))
+        else:
+            qty = abs(amt)
         extra = 'closing %s %g from %g — P&L ≈ $%+.2f' % (
             'long' if amt > 0 else 'short', abs(amt), entry, (px - entry) * amt)
         return preview(chat, 'CLOSE', sym, side, qty, px, limit, None,
@@ -287,6 +299,8 @@ def do_sell(chat, sym, usd=None, limit=None, sl=None):
 
 def do_confirm(chat):
     p = PENDING.pop(chat, None)
+    if p and p.get('action') == 'RESTART':
+        return do_restart(p['bots'])
     if not p:
         return "Nothing waiting. Tell me what to buy or sell first."
     if time.time() - p['ts'] > 90:
@@ -413,6 +427,66 @@ def server_status():
 
 
 
+
+# ── bot control ───────────────────────────────────────────────────────────
+def _flag(label):
+    return os.path.join(BOTS[label][0], 'PAUSED')
+
+def is_paused(label):
+    return os.path.exists(_flag(label))
+
+def do_pause(labels):
+    out = []
+    for b in labels:
+        try:
+            open(_flag(b), 'w').write(time.strftime('%Y-%m-%d %H:%M:%S'))
+            out.append('\u23F8 *%s* paused - no new entries.' % b)
+        except Exception as e:
+            out.append('Could not pause %s: %s' % (b, e))
+    out.append('')
+    out.append('_Open positions are still managed and their stops stay live. '
+               'Say *resume* to re-enable entries._')
+    return NL.join(out)
+
+def do_resume(labels):
+    out = []
+    for b in labels:
+        f = _flag(b)
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+                out.append('\u25B6 *%s* resumed - taking entries again.' % b)
+            except Exception as e:
+                out.append('Could not resume %s: %s' % (b, e))
+        else:
+            out.append('*%s* was not paused.' % b)
+    return NL.join(out)
+
+def do_restart(labels):
+    out = []
+    for b in labels:
+        try:
+            r = subprocess.run(['systemctl', 'restart', 'alphabot-' + b],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                out.append('\U0001F504 *%s* restarted.' % b)
+            else:
+                out.append('%s restart failed: %s' % (b, (r.stderr or '')[:80]))
+        except Exception as e:
+            out.append('%s restart failed: %s' % (b, e))
+    out.append('')
+    out.append('_It reconciles its open positions from the exchange on boot._')
+    return NL.join(out)
+
+def which_bots(t):
+    """Which bots is this message about? Defaults to all."""
+    named = [b for b in BOTS if re.search(r'\b' + b + r'\b', t)]
+    if named:
+        return named
+    if re.search(r'\b(all|every|both)\b', t):
+        return list(BOTS)
+    return list(BOTS)
+
 # ── conversation memory ───────────────────────────────────────────────────
 LAST = {}          # chat -> {'sym': 'DOGEUSDT', 'bot': 'main'}
 
@@ -526,6 +600,20 @@ def parse(chat, text):
     if re.search(r'\b(thanks|thank you|thx|good job|nice)', t):
         return 'Anytime. Say *report* whenever you want the full picture.'
 
+    # bot control: pause / resume / restart
+    if re.search(r'\b(pause|paus|halt|freeze|hold off|stop trading|'
+                 r'stop entries)', t):
+        return do_pause(which_bots(t))
+    if re.search(r'\b(resume|unpause|un-pause|continue|start trading|'
+                 r'carry on)', t):
+        return do_resume(which_bots(t))
+    if re.search(r'\b(restart|reboot|reload)', t):
+        bots = which_bots(t)
+        PENDING[chat] = dict(action='RESTART', bots=bots, ts=time.time())
+        return ('Restart *%s*?' % ', '.join(bots) + NL +
+                '_Open positions are reconciled from the exchange on boot._' +
+                NL + NL + 'Reply *yes* to go ahead.')
+
     # full performance report
     if re.search(r'\b(report|analys|analyz|performance|how am i doing|'
                  r'summary|stats|statistic|review)', t):
@@ -560,8 +648,16 @@ def parse(chat, text):
     if not (buy or sell):
         return None
 
+    # explicit QUANTITY: '2 qty', 'qty 2', '2 units', '3 coins', '5x'
+    qty_units = None
+    m = (re.search(NUM + r'\s*(?:qty|units?|coins?|tokens?|contracts?|shares?)', t)
+         or re.search(r'(?:qty|quantity|units?)\s*(?:of\s*)?' + NUM, t)
+         or re.search(NUM + r'\s*x\b', t))
+    if m: qty_units = float(m.group(1))
+
     usd = None
-    m = re.search(r'(?:\$|usd\s*)' + NUM, t) or re.search(NUM + r'\s*(?:usd|dollar)', t)
+    m = (re.search(r'(?:\$|usd\s*)' + NUM, t)
+         or re.search(NUM + r'\s*(?:usd|dollars?|worth|bucks)', t))
     if m: usd = float(m.group(1))
 
     limit = None
@@ -573,7 +669,7 @@ def parse(chat, text):
     if m: sl = float(m.group(1))
 
     # symbol: try every word, skipping ones already consumed as numbers
-    used = {str(x) for x in (usd, limit, sl) if x is not None}
+    used = {str(x) for x in (usd, limit, sl, qty_units) if x is not None}
     sym = None
     for w in re.findall(r'[a-z0-9]+', t):
         if w in used or w.isdigit():
@@ -589,14 +685,17 @@ def parse(chat, text):
         return ("I couldn't work out which coin you mean. Try something like "
                 '"buy 200 doge" or "sell btc".')
 
-    # a bare number with no $ is treated as the size
-    if usd is None:
+    # A bare number is ambiguous. Default it to DOLLARS (the common case) but
+    # the preview says so explicitly, because reading '2' as $2 silently bought
+    # 0.02 units of a $100 coin.
+    if usd is None and qty_units is None:
         for n in re.findall(NUM, t):
             if limit is not None and float(n) == limit: continue
             if sl is not None and float(n) == sl: continue
-            usd = float(n); break
+            usd = float(n)
+            break
 
-    return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl)
+    return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl, qty_units)
 
 HELP = NL.join([
     '👋 Talk to me normally. Examples:',
