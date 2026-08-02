@@ -166,8 +166,62 @@ def fmt_bot(label):
         tr.get('wins', 0), tr.get('losses', 0), tr.get('total_pnl', 0)))
     return NL.join(out)
 
+def bot_owned_symbols():
+    """Every symbol currently claimed by a bot's position file."""
+    owned = {}
+    for label in BOTS:
+        d, posf, _ = BOTS[label]
+        for sym in jload(os.path.join(d, posf)).get('positions', {}):
+            owned[sym] = label
+    return owned
+
+def manual_positions():
+    """Live exchange positions that no bot claims - i.e. placed by hand here.
+
+    These carry NO stop-loss and nothing manages them. Worse, a bot whose
+    symbol list covers one WILL adopt it on its next reconcile, so they need
+    to be visible rather than silently sitting on the account.
+    """
+    try:
+        rows = binance('GET', '/fapi/v2/positionRisk', auth=True)
+    except Exception as e:
+        return None, str(e)
+    owned = bot_owned_symbols()
+    out = []
+    for p in rows:
+        amt = float(p.get('positionAmt', 0) or 0)
+        if abs(amt) < 1e-9:
+            continue
+        sym = p['symbol']
+        if sym in owned:
+            continue
+        out.append(dict(sym=sym, amt=amt,
+                        entry=float(p.get('entryPrice', 0) or 0),
+                        pnl=float(p.get('unRealizedProfit', 0) or 0)))
+    return out, None
+
+def fmt_manual():
+    rows, err = manual_positions()
+    if err:
+        return '\u26A0 Could not read the exchange: %s' % err[:80]
+    if not rows:
+        return None
+    lines = ['*YOURS* \U0001F464 _placed by hand, no bot manages these_']
+    for r in rows:
+        emo = '\U0001F7E2' if r['pnl'] >= 0 else '\U0001F534'
+        lines.append('%s %s %s  %g @ %g  $%+.2f' % (
+            emo, r['sym'], 'LONG' if r['amt'] > 0 else 'SHORT',
+            abs(r['amt']), r['entry'], r['pnl']))
+    lines.append('   \u26A0 no stop-loss - say *sell %s* to close'
+                 % rows[0]['sym'].replace('USDT', '').lower())
+    return NL.join(lines)
+
 def all_bots():
-    return (NL + NL).join(fmt_bot(b) for b in BOTS)
+    parts = [fmt_bot(b) for b in BOTS]
+    mine = fmt_manual()
+    if mine:
+        parts.append(mine)
+    return (NL + NL).join(parts)
 
 # ── trading ───────────────────────────────────────────────────────────────
 PENDING = {}
