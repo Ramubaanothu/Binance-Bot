@@ -178,53 +178,7 @@ def guard(sym):
                 'against its live position and desync its book.' % (sym, OWNED[sym]))
     if sym.endswith('USDC'):
         return '⚠️ Heads up: USDC pairs belong to the reverse bot.'
-
-    # ── nothing matched: guess what they meant rather than dead-end ──
-    words = set(re.findall(r'[a-z0-9]+', t))
-
-    # did they name a coin? offer the obvious actions
-    for w in words:
-        if len(w) < 2 or w in ('the', 'and', 'for', 'you', 'how', 'what',
-                               'bot', 'bots', 'is', 'it', 'my', 'me', 'a'):
-            continue
-        sym = resolve_symbol(w)
-        if sym:
-            remember(chat, sym=sym)
-            try:
-                px = mark(sym)
-                amt, entry = my_position(sym)
-            except Exception:
-                px, amt, entry = 0, 0, 0
-            lines = ['*%s* is at %g' % (sym, px)]
-            if abs(amt) > 1e-9:
-                lines.append('You hold %g (entry %g).' % (amt, entry))
-                lines.append('Say *sell %s* to close it.' % w)
-            else:
-                lines.append('No position. Say *buy %g %s* to open one, '
-                             'or *buy %s at <price>* for a limit.'
-                             % (DEFAULT_USD, w, w))
-            return NL.join(lines)
-
-    # pronouns referring to the last symbol we discussed
-    if re.search(r'\b(it|that|this one)\b', t):
-        sym = recall(chat, 'sym')
-        if sym:
-            if re.search(r'\b(sell|close|dump|exit|out)\b', t):
-                return do_sell(chat, sym, None, None)
-            if re.search(r'\b(buy|more|add|long)\b', t):
-                return do_buy(chat, sym, None, None, None)
-            return 'You mean %s? Say *buy* or *sell* with it.' % sym
-
-    if re.search(r'\b(help|how|what can)\b', t):
-        return HELP
-
-    return ("I didn't catch that. Try:" + NL +
-            '   *report* - full performance breakdown' + NL +
-            '   *positions* - what is open right now' + NL +
-            '   *today* - how today is going' + NL +
-            '   *server status* - the droplet' + NL +
-            '   *buy 100 doge* / *sell doge* - place a trade' + NL + NL +
-            '_Plain English is fine._')
+    return None
 
 def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
     PENDING[chat] = dict(action=action, sym=sym, side=side, qty=qty,
@@ -508,6 +462,27 @@ def _stats(ts):
                 net=sum(t.get('pnl_usd', 0) for t in ts),
                 aw=(gw / len(w) if w else 0), al=(gl / len(l) if l else 0))
 
+def venue_info():
+    """What market do my orders actually hit? Asked once and got nothing back."""
+    return NL.join([
+        '\U0001F4CD *What you are trading here*',
+        '',
+        'Orders I place go to *Binance FUTURES testnet* - USDT-margined',
+        '*perpetuals*, not spot. Play money.',
+        '',
+        '   \u2022 buy = open a LONG perp',
+        '   \u2022 sell = close it, or open a SHORT if you are flat',
+        '   \u2022 leverage is whatever the account is set to per symbol',
+        '',
+        '*The bots:*',
+        '   main / reverse - futures perps, live testnet fills',
+        '   hype - SPOT prices, simulated fills (spot testnet needs its',
+        '   own API key, which the futures key cannot access)',
+        '',
+        '_Spot and futures testnets are separate registrations at Binance,_',
+        '_which is why the hype book is still paper._',
+    ])
+
 def trade_report():
     """Honest performance summary across every book."""
     from collections import defaultdict
@@ -614,6 +589,12 @@ def parse(chat, text):
                 '_Open positions are reconciled from the exchange on boot._' +
                 NL + NL + 'Reply *yes* to go ahead.')
 
+    # what market am I trading?
+    if re.search(r'\b(perp|perpetual|futures|spot|margin|leverage|'
+                 r'what market|which market|what am i trading)', t) \
+            and not re.search(r'\b(buy|sell)\b', t):
+        return venue_info()
+
     # full performance report
     if re.search(r'\b(report|analys|analyz|performance|how am i doing|'
                  r'summary|stats|statistic|review)', t):
@@ -646,7 +627,52 @@ def parse(chat, text):
     sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)', t))
     buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter|get)', t))
     if not (buy or sell):
-        return None
+        # ── nothing matched: guess what they meant rather than dead-end ──
+        words = set(re.findall(r'[a-z0-9]+', t))
+
+        # did they name a coin? offer the obvious actions
+        for w in words:
+            if len(w) < 2 or w in ('the', 'and', 'for', 'you', 'how', 'what',
+                                   'bot', 'bots', 'is', 'it', 'my', 'me', 'a'):
+                continue
+            sym = resolve_symbol(w)
+            if sym:
+                remember(chat, sym=sym)
+                try:
+                    px = mark(sym)
+                    amt, entry = my_position(sym)
+                except Exception:
+                    px, amt, entry = 0, 0, 0
+                lines = ['*%s* is at %g' % (sym, px)]
+                if abs(amt) > 1e-9:
+                    lines.append('You hold %g (entry %g).' % (amt, entry))
+                    lines.append('Say *sell %s* to close it.' % w)
+                else:
+                    lines.append('No position. Say *buy %g %s* to open one, '
+                                 'or *buy %s at <price>* for a limit.'
+                                 % (DEFAULT_USD, w, w))
+                return NL.join(lines)
+
+        # pronouns referring to the last symbol we discussed
+        if re.search(r'\b(it|that|this one)\b', t):
+            sym = recall(chat, 'sym')
+            if sym:
+                if re.search(r'\b(sell|close|dump|exit|out)\b', t):
+                    return do_sell(chat, sym, None, None)
+                if re.search(r'\b(buy|more|add|long)\b', t):
+                    return do_buy(chat, sym, None, None, None)
+                return 'You mean %s? Say *buy* or *sell* with it.' % sym
+
+        if re.search(r'\b(help|how|what can)\b', t):
+            return HELP
+
+        return ("I didn't catch that. Try:" + NL +
+                '   *report* - full performance breakdown' + NL +
+                '   *positions* - what is open right now' + NL +
+                '   *today* - how today is going' + NL +
+                '   *server status* - the droplet' + NL +
+                '   *buy 100 doge* / *sell doge* - place a trade' + NL + NL +
+                '_Plain English is fine._')
 
     # explicit QUANTITY: '2 qty', 'qty 2', '2 units', '3 coins', '5x'
     qty_units = None
