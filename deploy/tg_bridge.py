@@ -234,7 +234,8 @@ def guard(sym):
         return '⚠️ Heads up: USDC pairs belong to the reverse bot.'
     return None
 
-def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
+def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra='',
+            ambiguous=None):
     PENDING[chat] = dict(action=action, sym=sym, side=side, qty=qty,
                          limit=limit, sl=sl, ts=time.time())
     kind = ('limit @ %g' % limit) if limit else ('market, now ~%g' % px)
@@ -248,12 +249,18 @@ def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
         lines.append('   ⚠️ no stop-loss')
     if extra:
         lines.append('   ' + extra)
+    if ambiguous is not None:
+        # 'buy sol 5 @73' produced 0.06 units because the 5 was read as
+        # dollars. State the reading taken and show the alternative.
+        lines.append('   _took %g as DOLLARS - for %g units say_ `%g qty`'
+                     % (ambiguous, ambiguous, ambiguous))
     if warn:
         lines += ['', warn]
     lines += ['', 'Reply *yes* to place it, *no* to cancel.']
     return NL.join(lines)
 
-def do_buy(chat, sym, usd=None, limit=None, sl=None, qty_units=None):
+def do_buy(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
+           ambiguous=False):
     if qty_units is None and usd is None:
         usd = DEFAULT_USD
     try:
@@ -276,9 +283,11 @@ def do_buy(chat, sym, usd=None, limit=None, sl=None, qty_units=None):
     if limit:
         extra = 'market is %g, so this waits %s' % (
             px, 'for a dip' if limit < px else 'for a rise')
-    return preview(chat, 'BUY', sym, 'BUY', qty, px, limit, sl, guard(sym), extra)
+    return preview(chat, 'BUY', sym, 'BUY', qty, px, limit, sl, guard(sym), extra,
+                   ambiguous=(usd if ambiguous else None))
 
-def do_sell(chat, sym, usd=None, limit=None, sl=None, qty_units=None):
+def do_sell(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
+            ambiguous=False):
     try:
         amt, entry = my_position(sym)
         px = mark(sym)
@@ -768,14 +777,23 @@ def parse(chat, text):
     # A bare number is ambiguous. Default it to DOLLARS (the common case) but
     # the preview says so explicitly, because reading '2' as $2 silently bought
     # 0.02 units of a $100 coin.
+    ambiguous = False
     if usd is None and qty_units is None:
         for n in re.findall(NUM, t):
             if limit is not None and float(n) == limit: continue
             if sl is not None and float(n) == sl: continue
             usd = float(n)
+            # a bare number is genuinely ambiguous - default to dollars
+            # but flag it so the preview shows both readings
+            ambiguous = True
             break
 
-    return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl, qty_units)
+    r = (do_sell if sell else do_buy)(chat, sym, usd, limit, sl,
+                                      qty_units, ambiguous)
+    if 'spot' in t:
+        r += (NL + NL + '_Note: this places a FUTURES order. Spot trading is '
+              'not wired in here - the spot testnet needs its own API key._')
+    return r
 
 HELP = NL.join([
     '👋 Talk to me normally. Examples:',
