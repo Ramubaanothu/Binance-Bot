@@ -49,6 +49,13 @@ CASES = [
     ('e', 'spot orders',       r'spot orders',               r'What you are trading'),
     ('e', 'what am i trading', r'What you are trading',      None),
 
+    # ── day reports (a 00:0x 'today' used to just say nothing) ───────────
+    ('g', 'today',             r'Today',                     None),
+    ('g', 'yesterday',         r'Yesterday',                 r'Trade report'),
+    ('g', 'yesterday report',  r'Yesterday',                 r'Trade report'),
+    ('g', 'report for 2026-08-02', r'\*2026-08-02\*',         r'Trade report'),
+    ('g', 'report',            r'Trade report',              None),
+
     # ── read-only status commands ────────────────────────────────────────
     ('f', 'positions',         r'MAIN|YOURS',                None),
     ('f', 'analyse the trades', r'Trade report',             None),

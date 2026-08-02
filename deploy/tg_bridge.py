@@ -684,26 +684,49 @@ def trade_report():
                        % (st['wr'], st['al'], st['aw']))
     return NL.join(out)
 
-def today_summary():
-    """Short 'how did today go' answer."""
-    from collections import defaultdict
-    today = time.strftime('%Y-%m-%d')
+def day_rows(day):
+    """(live P&L, trade count, per-bot lines) for one calendar day.
+    Dates come from the bots' own close_date, which is server-local
+    (Asia/Kolkata) - so a 'day' here means an IST day."""
     tot, n, per = 0.0, 0, []
     for label in BOTS:
         d, posf, trf = BOTS[label]
         ts = [t for t in jload(os.path.join(d, trf)).get('trades', [])
-              if t.get('close_date') == today]
+              if t.get('close_date') == day]
         opn = len(jload(os.path.join(d, posf)).get('positions', {}))
         pnl = sum(t.get('pnl_usd', 0) for t in ts)
         tot += 0 if is_paper(d) else pnl
         n += len(ts)
         per.append('   %-8s %d closed  $%+.2f   %d open%s'
                    % (label, len(ts), pnl, opn, '  (paper)' if is_paper(d) else ''))
-    head = ('\U0001F4C5 *Today* - %d trades closed, $%+.2f on the live books'
-            % (n, tot))
-    if n == 0:
-        head += NL + '   Quiet so far. Nothing has closed yet.'
-    return NL.join([head, ''] + per)
+    return tot, n, per
+
+def day_block(day, title=None):
+    """title=None heads the block with the bare date, for an explicit day."""
+    tot, n, per = day_rows(day)
+    stamp = ('*%s* %s' % (title, day)) if title else ('*%s*' % day)
+    head = ('\U0001F4C5 %s - %d closed, $%+.2f on the live books'
+            % (stamp, n, tot))
+    return NL.join([head, ''] + per), n
+
+def today_summary():
+    """'How did today go'. Just after midnight this used to report nothing at
+    all, which reads as a broken bot when you watched trades close minutes
+    earlier - so when today is still empty, yesterday is shown too."""
+    now = time.time()
+    today = time.strftime('%Y-%m-%d', time.localtime(now))
+    body, n = day_block(today, 'Today')
+    if n:
+        return body
+    age_min = int(time.strftime('%H', time.localtime(now))) * 60 + \
+        int(time.strftime('%M', time.localtime(now)))
+    yday = time.strftime('%Y-%m-%d', time.localtime(now - 86400))
+    ybody, yn = day_block(yday, 'Yesterday')
+    note = ('   Nothing closed yet - the trading day is only %dh %02dm old.'
+            % (age_min // 60, age_min % 60))
+    if yn == 0:
+        return NL.join([body, note])
+    return NL.join([body, note, '', ybody])
 
 def spot_wallet():
     """What is actually sitting in the spot demo wallet."""
@@ -815,14 +838,23 @@ def parse(chat, text):
                               r'pending|position|account|cancel)', t):
         return venue_info()
 
+    # A named day is checked BEFORE the all-time report, otherwise "yesterday
+    # report" and "report for 2026-08-01" both match 'report' and return the
+    # whole history instead of that day.
+    if re.search(r'\b(yesterday|last night|previous day|last day)', t):
+        return day_block(time.strftime('%Y-%m-%d',
+                                       time.localtime(time.time() - 86400)),
+                         'Yesterday')[0]
+    m = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', t)
+    if m:
+        return day_block(m.group(1))[0]
+    if re.search(r'\b(today|so far|this morning|tonight)', t):
+        return today_summary()
+
     # full performance report
     if re.search(r'\b(report|analys|analyz|performance|how am i doing|'
                  r'summary|stats|statistic|review)', t):
         return trade_report()
-
-    # today
-    if re.search(r'\b(today|so far|this morning|tonight)', t):
-        return today_summary()
 
     # server / infrastructure health
     if re.search(r'\b(server|vps|vcpu|cpu|droplet|machine|host|uptime|health|memory|ram|disk|load|service)', t):
