@@ -1125,7 +1125,23 @@ class AlphaBot:
             self.pause_reason= ''
             self.emit('info', f"📅 New day — P&L reset. Balance: ${self.balance:.4f}")
 
+    PAUSE_FLAG = Path(__file__).parent / 'PAUSED'
+
     def guards_ok(self) -> bool:
+        # Operator pause (set from Telegram by creating a PAUSED file). Blocks
+        # NEW entries only — open positions are still trailed, managed and
+        # closed normally, and exchange-side stops stay live. Stopping the
+        # service would instead abandon open positions.
+        if self.PAUSE_FLAG.exists():
+            if not getattr(self, '_pause_logged', False):
+                self.emit('warn', '⏸ PAUSED by operator — no new entries '
+                                  '(open positions still managed)')
+                self._pause_logged = True
+            return False
+        elif getattr(self, '_pause_logged', False):
+            self.emit('info', '▶ Un-paused — entries allowed again')
+            self._pause_logged = False
+
         if self.paused:
             # Auto-resume from a DRAWDOWN pause once balance recovers (hysteresis:
             # 10% below the trip limit) — no manual restart needed.
@@ -1788,6 +1804,10 @@ class AlphaBot:
         if sym in self.positions: return
         if getattr(config, 'BTC_ONLY_MODE', False) and sym in getattr(config, 'CHART_SYMBOLS', ['BTCUSDT']):
             return   # the pure-chart loop owns these — scanner trades other alts
+        # Named blacklist: these lost heavily and some clear the volume floor
+        # on turnover alone (HYPE does $287M/day and still cost -$775).
+        if sym in getattr(config, 'ALT_BLACKLIST', set()):
+            return
         if not self.guards_ok(): return
         if time.time() < self._sym_cooldown.get(sym, 0):
             return   # stopped out recently — no revenge re-entry on the same coin
