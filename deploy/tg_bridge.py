@@ -176,7 +176,53 @@ def guard(sym):
                 'against its live position and desync its book.' % (sym, OWNED[sym]))
     if sym.endswith('USDC'):
         return '⚠️ Heads up: USDC pairs belong to the reverse bot.'
-    return None
+
+    # ── nothing matched: guess what they meant rather than dead-end ──
+    words = set(re.findall(r'[a-z0-9]+', t))
+
+    # did they name a coin? offer the obvious actions
+    for w in words:
+        if len(w) < 2 or w in ('the', 'and', 'for', 'you', 'how', 'what',
+                               'bot', 'bots', 'is', 'it', 'my', 'me', 'a'):
+            continue
+        sym = resolve_symbol(w)
+        if sym:
+            remember(chat, sym=sym)
+            try:
+                px = mark(sym)
+                amt, entry = my_position(sym)
+            except Exception:
+                px, amt, entry = 0, 0, 0
+            lines = ['*%s* is at %g' % (sym, px)]
+            if abs(amt) > 1e-9:
+                lines.append('You hold %g (entry %g).' % (amt, entry))
+                lines.append('Say *sell %s* to close it.' % w)
+            else:
+                lines.append('No position. Say *buy %g %s* to open one, '
+                             'or *buy %s at <price>* for a limit.'
+                             % (DEFAULT_USD, w, w))
+            return NL.join(lines)
+
+    # pronouns referring to the last symbol we discussed
+    if re.search(r'\b(it|that|this one)\b', t):
+        sym = recall(chat, 'sym')
+        if sym:
+            if re.search(r'\b(sell|close|dump|exit|out)\b', t):
+                return do_sell(chat, sym, None, None)
+            if re.search(r'\b(buy|more|add|long)\b', t):
+                return do_buy(chat, sym, None, None, None)
+            return 'You mean %s? Say *buy* or *sell* with it.' % sym
+
+    if re.search(r'\b(help|how|what can)\b', t):
+        return HELP
+
+    return ("I didn't catch that. Try:" + NL +
+            '   *report* - full performance breakdown' + NL +
+            '   *positions* - what is open right now' + NL +
+            '   *today* - how today is going' + NL +
+            '   *server status* - the droplet' + NL +
+            '   *buy 100 doge* / *sell doge* - place a trade' + NL + NL +
+            '_Plain English is fine._')
 
 def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra=''):
     PENDING[chat] = dict(action=action, sym=sym, side=side, qty=qty,
@@ -366,6 +412,92 @@ def server_status():
     return NL.join(out)
 
 
+
+# ── conversation memory ───────────────────────────────────────────────────
+LAST = {}          # chat -> {'sym': 'DOGEUSDT', 'bot': 'main'}
+
+def remember(chat, **kw):
+    LAST.setdefault(chat, {}).update({k: v for k, v in kw.items() if v})
+
+def recall(chat, key):
+    return LAST.get(chat, {}).get(key)
+
+def _stats(ts):
+    if not ts:
+        return None
+    w = [t for t in ts if t.get('pnl_usd', 0) > 0]
+    l = [t for t in ts if t.get('pnl_usd', 0) <= 0]
+    gw = sum(t['pnl_usd'] for t in w)
+    gl = -sum(t['pnl_usd'] for t in l)
+    return dict(n=len(ts), wr=len(w) / len(ts) * 100,
+                pf=(gw / gl if gl else None),
+                net=sum(t.get('pnl_usd', 0) for t in ts),
+                aw=(gw / len(w) if w else 0), al=(gl / len(l) if l else 0))
+
+def trade_report():
+    """Honest performance summary across every book."""
+    from collections import defaultdict
+    out = ['\U0001F4CA *Trade report*', '']
+    live = []
+    for label in BOTS:
+        d, _, trf = BOTS[label]
+        ts = jload(os.path.join(d, trf)).get('trades', [])
+        st = _stats(ts)
+        paper = is_paper(d)
+        if not paper:
+            live += ts
+        head = '*%s*%s' % (label.upper(), '  _(paper)_' if paper else '')
+        if not st:
+            out += [head, '   no closed trades yet', '']
+            continue
+        pf = 'n/a' if st['pf'] is None else '%.2f' % st['pf']
+        out += [head,
+                '   %d trades, %.0f%% won, PF %s' % (st['n'], st['wr'], pf),
+                '   net $%+.2f   avg win $%.2f vs loss $%.2f' % (
+                    st['net'], st['aw'], st['al'])]
+        by = defaultdict(float)
+        for t in ts:
+            by[t.get('symbol', '?')] += t.get('pnl_usd', 0)
+        if by:
+            rank = sorted(by.items(), key=lambda x: -x[1])
+            out.append('   best %s $%+.0f | worst %s $%+.0f' % (
+                rank[0][0], rank[0][1], rank[-1][0], rank[-1][1]))
+        out.append('')
+
+    st = _stats(live)
+    if st:
+        pf = 'n/a' if st['pf'] is None else '%.2f' % st['pf']
+        out += ['*Live books combined*',
+                '   %d trades, %.0f%% won, PF %s' % (st['n'], st['wr'], pf),
+                '   net $%+.2f' % st['net'], '']
+        if st['pf'] is not None and st['pf'] < 1:
+            out.append('\u26A0 PF below 1.00 - the book loses money even at a '
+                       '%.0f%% win rate, because the average loss ($%.2f) is '
+                       'bigger than the average win ($%.2f).'
+                       % (st['wr'], st['al'], st['aw']))
+    return NL.join(out)
+
+def today_summary():
+    """Short 'how did today go' answer."""
+    from collections import defaultdict
+    today = time.strftime('%Y-%m-%d')
+    tot, n, per = 0.0, 0, []
+    for label in BOTS:
+        d, posf, trf = BOTS[label]
+        ts = [t for t in jload(os.path.join(d, trf)).get('trades', [])
+              if t.get('close_date') == today]
+        opn = len(jload(os.path.join(d, posf)).get('positions', {}))
+        pnl = sum(t.get('pnl_usd', 0) for t in ts)
+        tot += 0 if is_paper(d) else pnl
+        n += len(ts)
+        per.append('   %-8s %d closed  $%+.2f   %d open%s'
+                   % (label, len(ts), pnl, opn, '  (paper)' if is_paper(d) else ''))
+    head = ('\U0001F4C5 *Today* - %d trades closed, $%+.2f on the live books'
+            % (n, tot))
+    if n == 0:
+        head += NL + '   Quiet so far. Nothing has closed yet.'
+    return NL.join([head, ''] + per)
+
 # ── natural language ──────────────────────────────────────────────────────
 YES = {'yes', 'y', 'yeah', 'yep', 'ok', 'okay', 'go', 'go ahead', 'do it',
        'confirm', 'sure', 'proceed', 'send it', 'buy it', 'sell it', 'correct'}
@@ -387,8 +519,24 @@ def parse(chat, text):
     if bare in ('start', 'help', 'commands') or 'what can you do' in t:
         return HELP
 
+    # greetings / small talk
+    if re.fullmatch(r'(hi|hey|hello|yo|good\s*(morning|evening|afternoon))!?', t):
+        return ('Hey. ' + today_summary() + NL + NL +
+                '_Ask me for a report, positions, server status, or place a trade._')
+    if re.search(r'\b(thanks|thank you|thx|good job|nice)', t):
+        return 'Anytime. Say *report* whenever you want the full picture.'
+
+    # full performance report
+    if re.search(r'\b(report|analys|analyz|performance|how am i doing|'
+                 r'summary|stats|statistic|review)', t):
+        return trade_report()
+
+    # today
+    if re.search(r'\b(today|so far|this morning|tonight)', t):
+        return today_summary()
+
     # server / infrastructure health
-    if re.search(r'\b(server|vps|vcpu|cpu|droplet|machine|host|uptime|health|memory|ram|disk|load|service|services)\b', t):
+    if re.search(r'\b(server|vps|vcpu|cpu|droplet|machine|host|uptime|health|memory|ram|disk|load|service)', t):
         return server_status()
 
     # status questions
@@ -403,12 +551,12 @@ def parse(chat, text):
         if re.search(r'\b' + name + r'\b', t):
             return fmt_bot(name)
     if re.search(r'\b(position|status|doing|pnl|p&l|profit|balance|how are|'
-                 r'summary|report|show|update)\b', t):
+                 r'summary|report|show|update)', t):
         return all_bots()
 
     # trading intent
-    sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)\b', t))
-    buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter|get)\b', t))
+    sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)', t))
+    buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter|get)', t))
     if not (buy or sell):
         return None
 
