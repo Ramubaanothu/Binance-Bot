@@ -590,6 +590,20 @@ def remember(chat, **kw):
 def recall(chat, key):
     return LAST.get(chat, {}).get(key)
 
+def remember_intent(chat, **kw):
+    """Unlike remember(), this overwrites with None too - so a fresh
+    'buy btc' clears the limit price left over from 'buy eth at 1860'."""
+    LAST.setdefault(chat, {}).update(kw)
+
+def same_coin_on(sym, venue):
+    """Carry a symbol across books: 1000PEPEUSDT (perp) -> PEPEUSDT (spot)."""
+    if not sym:
+        return None
+    if sym in _load_filters(venue)['syms']:
+        return sym
+    base = _F['fut']['base'].get(sym) or _F['spot']['base'].get(sym)
+    return resolve_symbol(base, venue) if base else None
+
 def _stats(ts):
     if not ts:
         return None
@@ -732,6 +746,21 @@ NO  = {'no', 'n', 'nope', 'cancel', 'stop', 'abort', 'nevermind', 'never mind',
 
 NUM = r'(\d+(?:\.\d+)?)'
 
+# '100$', '$100', '100 usd', 'make it 200', '5 qty' - a size and nothing
+# else. On its own it is meaningless; after a trade attempt it means
+# 'same thing, this size'.
+SIZE_ONLY = re.compile(
+    r'(?:make it|makeit|try|use|do|instead)?\s*\$?\s*' + NUM +
+    r'\s*(\$|usd[t]?|dollars?|bucks|qty|units?|coins?)?\s*'
+    r'(?:instead|please)?\s*')
+
+def bare_size(t):
+    m = SIZE_ONLY.fullmatch(t)
+    if not m:
+        return None
+    unit = (m.group(2) or '').rstrip('s')
+    return float(m.group(1)), unit in ('qty', 'unit', 'coin')
+
 def parse(chat, text):
     t = ' '.join((text or '').lower().split())
     if not t:
@@ -744,6 +773,18 @@ def parse(chat, text):
         return 'Cancelled.' if PENDING.pop(chat, None) else 'Nothing to cancel.'
     if bare in ('start', 'help', 'commands') or 'what can you do' in t:
         return HELP
+
+    # a size on its own continues whatever we were just doing
+    bs = bare_size(t)
+    if bs is not None:
+        last = LAST.get(chat, {})
+        if last.get('act') and last.get('sym'):
+            amt, as_units = bs
+            fn = do_sell if last['act'] == 'sell' else do_buy
+            return fn(chat, last['sym'],
+                      None if as_units else amt, last.get('limit'),
+                      last.get('sl'), amt if as_units else None,
+                      False, last.get('venue', 'fut'))
 
     # greetings / small talk
     if re.fullmatch(r'(hi|hey|hello|yo|good\s*(morning|evening|afternoon))!?', t):
@@ -896,9 +937,17 @@ def parse(chat, text):
         sym = resolve_symbol(w, venue)
         if sym:
             break
+    carried = ''
     if not sym:
-        return ("I couldn't work out which coin you mean. Try something like "
-                '"buy 200 doge" or "sell btc".')
+        # they named no coin - they almost certainly mean the one we were
+        # just discussing ('want to buy spot' straight after talking ETH)
+        sym = same_coin_on(recall(chat, 'sym'), venue)
+        if sym:
+            carried = NL + NL + '_(carried on from %s - say the coin if you '
+            carried = (carried % sym) + 'meant another)_'
+        else:
+            return ("I couldn't work out which coin you mean. Try something "
+                    'like "buy 200 doge" or "sell btc".')
 
     # A bare number is ambiguous. Default it to DOLLARS (the common case) but
     # the preview says so explicitly, because reading '2' as $2 silently bought
@@ -914,8 +963,12 @@ def parse(chat, text):
             ambiguous = True
             break
 
+    # Record BEFORE dispatching, so even a rejected attempt (below the
+    # minimum size, say) can be retried by replying with just a number.
+    remember_intent(chat, sym=sym, act=('sell' if sell else 'buy'),
+                    limit=limit, sl=sl, venue=venue)
     return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl,
-                                         qty_units, ambiguous, venue)
+                                         qty_units, ambiguous, venue) + carried
 
 HELP = NL.join([
     '👋 Talk to me normally. Examples:',
