@@ -45,7 +45,9 @@ CASES = [
     ('c', 'spot buy 200 sol',  r'SPOT',                      None),
     ('c', 'buy 200 sol',       r'_perp_',                    r'SPOT'),
     ('d', 'spot sell sol',     r'no shorting',               None),
-    ('e', 'spot wallet',       r'Spot wallet',               r'What you are trading'),
+    ('e', 'spot wallet',       r'Spot wallet',               r'\*SPOT\*  '),
+    ('e', 'spot bot',          r'\*SPOT\*',                  r'Spot wallet'),
+    ('e', 'how is the spot bot doing', r'\*SPOT\*',          None),
     ('e', 'spot orders',       r'spot orders',               r'What you are trading'),
     ('e', 'what am i trading', r'What you are trading',      None),
 

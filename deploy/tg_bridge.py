@@ -25,7 +25,7 @@ NL = chr(10)
 BOTS = {
     'main':    ('/home/bots/main',    'positions_binance.json', 'trades_binance.json'),
     'reverse': ('/home/bots/reverse', 'positions_reverse.json', 'trades_reverse.json'),
-    'hype':    ('/home/bots/hype',    'positions_hype.json',    'trades_hype.json'),
+    'spot':    ('/home/bots/spot',    'positions_spot.json',    'trades_spot.json'),
 }
 OWNED = {'BTCUSDT': 'main bot', 'SOLUSDT': 'main bot'}
 DEFAULT_USD = 100.0
@@ -168,7 +168,7 @@ def jload(p):
 
 def is_paper(d):
     """A paper book's positions are simulated and will NOT match the exchange.
-    Labelling this is essential: the hype bot showed five holdings while
+    Labelling this is essential: the spot bot showed five holdings while
     Binance held none of them, which reads as a bug rather than by design."""
     try:
         src = open(os.path.join(d, 'config.py'), encoding='utf-8').read()
@@ -266,7 +266,7 @@ PENDING = {}
 
 def guard(sym, venue='fut'):
     if venue == 'spot':
-        # the bots are all futures (hype trades on paper), so nothing of
+        # main/reverse are futures and spot trades on paper, so nothing of
         # theirs can be netted against by a spot order
         return None
     if sym in OWNED:
@@ -487,7 +487,7 @@ def server_status():
 
     out.append('')
     out.append('⚙ *Services*')
-    for sv in ('alphabot-main', 'alphabot-reverse', 'alphabot-hype', 'alphabot-telegram'):
+    for sv in ('alphabot-main', 'alphabot-reverse', 'alphabot-spot', 'alphabot-telegram'):
         try:
             state = subprocess.run(['systemctl', 'is-active', sv], capture_output=True,
                                    text=True, timeout=8).stdout.strip()
@@ -575,6 +575,11 @@ def do_restart(labels):
 def which_bots(t):
     """Which bots is this message about? Defaults to all."""
     named = [b for b in BOTS if re.search(r'\b' + b + r'\b', t)]
+    # a venue word alone must not be read as naming the spot BOT, or
+    # "spot buy sol" would look like an instruction aimed at that bot
+    if named == ['spot'] and not re.search(r'\bspot\s*bot\b', t) \
+            and re.search(r'\b(buy|sell|wallet|order)', t):
+        named = []
     if named:
         return named
     if re.search(r'\b(all|every|both)\b', t):
@@ -637,7 +642,7 @@ def venue_info():
         '',
         '*The bots:*',
         '   main / reverse - perps, live demo fills',
-        '   hype - spot prices, simulated fills (paper by choice, not',
+        '   spot - spot prices, simulated fills (paper by choice, not',
         '   by limitation)',
     ])
 
@@ -835,7 +840,7 @@ def parse(chat, text):
     if re.search(r'\b(perp|perpetual|futures|spot|margin|leverage|'
                  r'what market|which market|what am i trading)', t) \
             and not re.search(r'\b(buy|sell|wallet|balance|holding|order|'
-                              r'pending|position|account|cancel)', t):
+                              r'pending|position|account|cancel|bot)', t):
         return venue_info()
 
     # A named day is checked BEFORE the all-time report, otherwise "yesterday
@@ -869,12 +874,18 @@ def parse(chat, text):
             sym = resolve_symbol(w, v) if w else None
             if sym: return do_cancel_orders(sym, v)
         return do_orders(v)
-    for name in BOTS:
-        if re.search(r'\b' + name + r'\b', t):
-            return fmt_bot(name)
+    # 'spot' is now BOTH a bot name and a venue, so order matters here:
+    # most specific first, or "spot buy sol" returns a status card.
+    if re.search(r'\bspot\s*bot\b', t):
+        return fmt_bot('spot')
     if re.search(r'\bspot\b', t) and re.search(
             r'\b(wallet|balance|holding|position|account|what.*hold)', t):
         return spot_wallet()
+    for name in BOTS:
+        if name == 'spot':
+            continue                      # handled just above
+        if re.search(r'\b' + name + r'\b', t):
+            return fmt_bot(name)
     if re.search(r'\b(position|status|doing|pnl|p&l|profit|balance|how are|'
                  r'summary|report|show|update)', t):
         return all_bots()
