@@ -2713,9 +2713,30 @@ class AlphaBot:
             by_vol  = sorted(perps, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
             vol_top = [t['symbol'] for t in by_vol] if config.SCAN_ALL_PERPS else [t['symbol'] for t in by_vol[:config.TOP_N_SYMBOLS]]
 
+            # Tokenized equities carry their own, lower volume floor. They are
+            # matched by NAME, not by scanning - the crypto filters above would
+            # either miss them or drag thin coins back in alongside them.
+            stocks = []
+            if getattr(config, 'STOCK_TRADING', False):
+                _want = set(getattr(config, 'STOCK_SYMBOLS', []))
+                _floor = getattr(config, 'STOCK_MIN_VOLUME_USDT', 50_000_000)
+                _vol = {t['symbol']: float(t.get('quoteVolume', 0) or 0)
+                        for t in all_perps}
+                stocks = [x for x in getattr(config, 'STOCK_SYMBOLS', [])
+                          if _vol.get(x, 0) >= _floor]
+                _thin = sorted(_want - set(stocks))
+                if _thin:
+                    self.emit('info', '\U0001F4C9 stocks below $%dM skipped: %s'
+                              % (_floor / 1e6, ', '.join(_thin)))
+
+            # With alts OFF the scanner must not wander back into them:
+            # majors + stocks only. (Alts since 8 Jul: n=48 WR 27.1% PF 0.36.)
+            if not getattr(config, 'ALT_TRADING', False):
+                movers, vol_top = [], []
+
             # Priority symbols always included (BTC/ETH/BNB/SOL/XRP first regardless of volume)
             seen, symbols = set(), []
-            for s in config.PRIORITY_SYMBOLS + movers + vol_top:
+            for s in config.PRIORITY_SYMBOLS + stocks + movers + vol_top:
                 if s not in seen: seen.add(s); symbols.append(s)
 
             # Build initial market intel from tickers
@@ -2740,7 +2761,8 @@ class AlphaBot:
                 'btc_change': round(float(next((t.get('priceChangePercent', 0) for t in perps if t['symbol'] == 'BTCUSDT'), 0)), 2),
             }
             self.emit('info',
-                f"🔭 Universe: {len(symbols)} {QUOTE} perps | "
+                f"🔭 Universe: {len(symbols)} {QUOTE} perps"
+                f"{f' (incl {len(stocks)} stocks)' if stocks else ''} | "
                 f"📈 {up_n} up / 📉 {dn_n} down | mood={self.market_intel['market_mood']} | "
                 f"🔥 Top mover: {by_move[0]['symbol']} {float(by_move[0].get('priceChangePercent',0)):+.1f}%"
             )
@@ -2800,8 +2822,20 @@ class AlphaBot:
                 by_vol  = sorted(perps, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
                 movers_sym = [t['symbol'] for t in by_move[:config.TOP_MOVERS_N]]
                 vol_sym    = [t['symbol'] for t in by_vol] if config.SCAN_ALL_PERPS else [t['symbol'] for t in by_vol[:config.TOP_N_SYMBOLS]]
+                # This rebuild runs EVERY scan and used to overwrite the
+                # boot-time universe, dragging alts back in even with
+                # ALT_TRADING off. Apply the same restriction here.
+                stock_sym = []
+                if getattr(config, 'STOCK_TRADING', False):
+                    _vol = {t['symbol']: float(t.get('quoteVolume', 0) or 0)
+                            for t in all_perps}
+                    _floor = getattr(config, 'STOCK_MIN_VOLUME_USDT', 50_000_000)
+                    stock_sym = [x for x in getattr(config, 'STOCK_SYMBOLS', [])
+                                 if _vol.get(x, 0) >= _floor]
+                if not getattr(config, 'ALT_TRADING', False):
+                    movers_sym, vol_sym = [], []
                 seen, symbols = set(), []
-                for s in config.PRIORITY_SYMBOLS + movers_sym + vol_sym:
+                for s in config.PRIORITY_SYMBOLS + stock_sym + movers_sym + vol_sym:
                     if s not in seen: seen.add(s); symbols.append(s)
             except Exception as e:
                 log.debug(f"movers refresh: {e}")
@@ -3130,7 +3164,9 @@ class AlphaBot:
         # Run trading loops; server runs in background as long as event loop is alive
         if REVERSE:
             await self.scan_loop()          # reverse experiment: scanner only
-        elif getattr(config, 'BTC_ONLY_MODE', False) and getattr(config, 'ALT_TRADING', False):
+        elif getattr(config, 'BTC_ONLY_MODE', False) and (
+                getattr(config, 'ALT_TRADING', False)
+                or getattr(config, 'STOCK_TRADING', False)):
             # DUAL MODE: BTC pure-chart loop + conservative alt scanner in parallel.
             # scan_loop performs the boot (precisions/balance/reconcile); the chart
             # loop skips its own boot to avoid doing it twice.
