@@ -46,6 +46,21 @@ def save_conf(**kv):
         for k, v in c.items():
             f.write(k + '=' + v + NL)
 
+# ── keyboards ─────────────────────────────────────────────────────────────
+def _kb(rows, once=False):
+    return json.dumps({'keyboard': [[{'text': b} for b in r] for r in rows],
+                       'resize_keyboard': True,
+                       'one_time_keyboard': once})
+
+# The everyday menu. Kept to six so the buttons stay wide enough to read.
+MENU = _kb([['\U0001F4CA Positions', '\U0001F4C5 Today'],
+            ['\U0001F4C8 Report',    '\U0001F4B0 Spot wallet'],
+            ['\U0001F5A5 Server',    '\u2753 Help']])
+
+# Shown ONLY while an order is waiting. Deliberately a different shape to
+# the menu, so 'yes' never lands where 'Positions' just was.
+CONFIRM = _kb([['\u2705 YES, place it', '\u274C Cancel']], once=True)
+
 def tg(token, method, **params):
     url = 'https://api.telegram.org/bot' + token + '/' + method
     with urllib.request.urlopen(url, urllib.parse.urlencode(params).encode(),
@@ -789,8 +804,15 @@ def bare_size(t):
     unit = (m.group(2) or '').rstrip('s')
     return float(m.group(1)), unit in ('qty', 'unit', 'coin')
 
+def _clean(text):
+    """Buttons send their label, emoji and all. Drop leading non-letters so
+    '\U0001F4CA Positions' parses exactly like 'positions'."""
+    t = (text or '').strip()
+    t = re.sub(r'^[^0-9A-Za-z/$]+', '', t)
+    return re.sub(r'[^0-9A-Za-z/$@.,\s\'&?-]+', ' ', t).strip()
+
 def parse(chat, text):
-    t = ' '.join((text or '').lower().split())
+    t = ' '.join(_clean(text).lower().split())
     if not t:
         return None
     bare = t.lstrip('/')
@@ -937,13 +959,14 @@ def parse(chat, text):
         if re.search(r'\b(help|how|what can)\b', t):
             return HELP
 
-        return ("I didn't catch that. Try:" + NL +
-                '   *report* - full performance breakdown' + NL +
-                '   *positions* - what is open right now' + NL +
-                '   *today* - how today is going' + NL +
-                '   *server status* - the droplet' + NL +
-                '   *buy 100 doge* / *sell doge* - place a trade' + NL + NL +
-                '_Plain English is fine._')
+        return ("I didn't catch that \U0001F937" + NL + NL +
+                '*Tap a button below* for the usual things, or type:' + NL +
+                '   *buy 100 doge*        open a perp' + NL +
+                '   *spot buy 200 sol*    buy on spot' + NL +
+                '   *sell btc*            close it' + NL +
+                '   *yesterday*           how yesterday went' + NL +
+                '   *pause reverse bot*   stop new entries' + NL + NL +
+                '_Plain English is fine - I do not need exact commands._')
 
     # explicit QUANTITY: '2 qty', 'qty 2', '2 units', '3 coins', '5x'
     qty_units = None
@@ -1040,12 +1063,17 @@ HELP = NL.join([
 ])
 
 def handle(chat, text):
+    """Returns (reply, keyboard)."""
     try:
         r = parse(chat, text)
     except Exception as e:
-        return 'Something went wrong: %s' % e
-    return r or ("Not sure what you meant. Try \"show positions\" or "
-                 "\"buy 100 doge\" — or say *help*.")
+        return ('Something went wrong: %s' % e, MENU)
+    if not r:
+        r = ("I didn't catch that. Tap a button below, or type things like:"
+             + NL + '   *buy 100 doge*   *sell btc*   *spot buy 200 sol*'
+             + NL + '   *yesterday*   *pause reverse bot*')
+    # an order waiting on a yes gets the confirm pad instead of the menu
+    return (r, CONFIRM if chat in PENDING else MENU)
 
 def main():
     print('waiting for token...', flush=True)
@@ -1066,8 +1094,9 @@ def main():
                 if not bound:
                     save_conf(CHAT=chat); bound = chat
                 if chat != bound: continue
+                reply, kb = handle(chat, msg.get('text', ''))
                 tg(token, 'sendMessage', chat_id=chat, parse_mode='Markdown',
-                   text=handle(chat, msg.get('text', ''))[:4000])
+                   reply_markup=kb, text=reply[:4000])
         except Exception as e:
             print('poll error: %s' % e, flush=True)
             time.sleep(10)
