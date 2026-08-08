@@ -53,10 +53,11 @@ def _kb(rows, once=False):
                        'one_time_keyboard': once})
 
 # The everyday menu. Kept to six so the buttons stay wide enough to read.
-MENU = _kb([['\U0001F4CA Positions',  '\U0001F4BC Balance'],
-            ['\U0001F4C5 Today',      '\U0001F4C6 Yesterday'],
-            ['\U0001F4C8 Report',     '\U0001F4CB Orders'],
-            ['\U0001F5A5 Server',     '\u2753 Help']])
+MENU = _kb([['\U0001F4B9 Trade',      '\U0001F4CA Positions'],
+            ['\U0001F4BC Balance',    '\U0001F4C5 Today'],
+            ['\U0001F4C6 Yesterday',  '\U0001F4C8 Report'],
+            ['\U0001F4CB Orders',     '\U0001F5A5 Server'],
+            ['\u2753 Help']])
 
 # Shown ONLY while an order is waiting. Deliberately a different shape to
 # the menu, so 'yes' never lands where 'Positions' just was.
@@ -151,6 +152,16 @@ def spot_free(asset):
                      venue='spot').get('balances', []):
         if b['asset'] == asset:
             return float(b['free'])
+    return 0.0
+
+def spot_locked(asset):
+    """Held but committed to a resting order. The spot bot parks its whole
+    take-profit as a LIMIT sell, so 'free' is dust while the coins are very
+    much still owned - which read as 'selling 0 of 0.000329 held'."""
+    for b in binance('GET', '/api/v3/account', auth=True,
+                     venue='spot').get('balances', []):
+        if b['asset'] == asset:
+            return float(b.get('locked', 0) or 0)
     return 0.0
 
 def my_position(sym, venue='fut'):
@@ -508,6 +519,12 @@ def do_sell(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
         else:
             qty = round_qty(sym, abs(amt), venue)
         if venue == 'spot':
+            if qty <= 0:
+                _b = _load_filters('spot')['base'].get(sym, '')
+                return ('%g %s is held but locked in a resting sell order, so '
+                        'there is nothing free to sell right now.%sCancel it '
+                        'first: `cancel orders on %s`'
+                        % (abs(amt), _b, NL + NL, short_sym(sym).lower()))
             extra = 'selling %g of %g held' % (qty, abs(amt))
         else:
             extra = 'closing %s %g from %g — P&L ≈ $%+.2f' % (
@@ -516,6 +533,14 @@ def do_sell(chat, sym, usd=None, limit=None, sl=None, qty_units=None,
         return preview(chat, 'CLOSE', sym, side, qty, px, limit, None,
                        guard(sym, venue), extra, venue=venue)
     if venue == 'spot':
+        # the coins may be sitting in a resting take-profit order rather than
+        # gone - say so, instead of offering to sell zero units
+        _b = _load_filters('spot')['base'].get(sym, '')
+        _lk = spot_locked(_b) if _b else 0.0
+        if _lk > 0:
+            return ('You hold %g %s, but it is committed to a resting '
+                    'sell order.%sCancel that first: `cancel orders on %s`'
+                    % (_lk, _b, NL + NL, short_sym(sym).lower()))
         # spot cannot short. Saying 'sell' with an empty wallet is far more
         # likely a mistake than a request to open one on the perp book.
         base = _load_filters('spot')['base'].get(sym, sym)
@@ -1047,6 +1072,10 @@ def parse(chat, text):
                  r'how are|summary|show|update)', t):
         return fmt_positions()
 
+    # the tap-through flow: 'trade' on its own opens the picker
+    if re.fullmatch(r'(trade|buy|sell|order)s?', t):
+        return ('__TRADE__', None)
+
     # Which book? Demo Trading is one account on two hosts, so the only
     # thing that decides this is the wording.
     venue = 'spot' if re.search(r'\bspot\b', t) else 'fut'
@@ -1266,12 +1295,174 @@ def changes():
     _seen = now
     return out
 
+# ── tap-through trading ───────────────────────────────────────────────────
+def _ikb(rows):
+    """Inline keyboard: buttons attached to the message itself."""
+    return json.dumps({'inline_keyboard':
+                       [[{'text': t, 'callback_data': d} for t, d in r]
+                        for r in rows]})
+
+TRADE = {}            # chat -> {side, sym, usd, venue}
+POPULAR = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'BNB', 'ADA', 'LINK']
+SIZES = [100, 250, 500, 1000]
+
+
+def held_symbols():
+    """Everything actually held -> the VENUE it is held on.
+
+    Carrying the venue is not cosmetic. GIGGLE is a spot bag; offering it in
+    a sell list that defaulted to perps made do_sell fall through to its
+    'you don't hold this, so this opens a short' branch. Selling must follow
+    the coin to where it actually is.
+    """
+    out = {}
+    for label in BOTS:
+        d, posf, _ = BOTS[label]
+        v = 'spot' if label == 'spot' else 'fut'
+        for sym in jload(os.path.join(d, posf)).get('positions', {}):
+            out[sym] = v
+    try:
+        for p in binance('GET', '/fapi/v2/positionRisk', auth=True):
+            if abs(float(p.get('positionAmt', 0) or 0)) > 1e-9:
+                out.setdefault(p['symbol'], 'fut')
+    except Exception:
+        pass
+    return out
+
+
+def trade_menu(chat):
+    TRADE[chat] = {'venue': 'fut'}
+    return ('*Trade*' + NL + NL + 'What would you like to do?',
+            _ikb([[('\U0001F7E2  Buy', 'tb'), ('\U0001F534  Sell', 'ts')],
+                  [('\u274C  Cancel', 'tx')]]))
+
+
+def trade_symbols(chat, side):
+    st = TRADE.setdefault(chat, {'venue': 'fut'})
+    st['side'] = side
+    if side == 'sell':
+        held = held_symbols()
+        if not held:
+            TRADE.pop(chat, None)
+            return ('You are not holding anything to sell.', None)
+        rows, row = [], []
+        for sym in sorted(held)[:12]:
+            v = held[sym]
+            label = '%s%s' % (short_sym(sym), '  (spot)' if v == 'spot' else '')
+            row.append((label, 'ty:%s:%s' % (v, sym)))   # venue travels with it
+            if len(row) == 2:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+    else:
+        rows, row = [], []
+        for b in POPULAR:
+            row.append((b, 'ty:' + b + 'USDT'))
+            if len(row) == 3:
+                rows.append(row); row = []
+        if row:
+            rows.append(row)
+    rows.append([('\u2B05 Back', 'tback'), ('\u274C Cancel', 'tx')])
+    verb = 'buy' if side == 'buy' else 'sell'
+    return ('*Which coin do you want to %s?*%s_or just type it, e.g._ `%s pepe`'
+            % (verb, NL + NL, verb), _ikb(rows))
+
+
+def trade_sizes(chat, sym):
+    st = TRADE.setdefault(chat, {'venue': 'fut'})
+    st['sym'] = sym
+    v = st.get('venue', 'fut')
+    if st.get('side') == 'sell':
+        # selling closes what is held - no size grid needed
+        return trade_preview(chat)
+    rows = [[('$%d' % a, 'tz:%d' % a) for a in SIZES[:2]],
+            [('$%d' % a, 'tz:%d' % a) for a in SIZES[2:]],
+            [('\U0001F501 %s' % ('spot' if v == 'fut' else 'perp'), 'tv')],
+            [('\u2B05 Back', 'tb' if st.get('side') == 'buy' else 'ts'),
+             ('\u274C Cancel', 'tx')]]
+    try:
+        px = mark(sym, v)
+        sub = '%s is at %g   _(%s)_' % (short_sym(sym), px,
+                                        'spot' if v == 'spot' else 'perp')
+    except Exception:
+        sub = short_sym(sym)
+    return ('*How much %s?*%s%s' % (short_sym(sym), NL + NL, sub), _ikb(rows))
+
+
+def trade_preview(chat, usd=None):
+    st = TRADE.get(chat) or {}
+    sym, side, v = st.get('sym'), st.get('side'), st.get('venue', 'fut')
+    if not sym or not side:
+        return ('That trade expired. Tap *Trade* to start again.', None)
+    if usd is not None:
+        st['usd'] = usd
+    fn = do_sell if side == 'sell' else do_buy
+    txt = fn(chat, sym, st.get('usd'), None, None, None, False, v)
+    # the typed flow ends with 'Reply yes...' - noise when the buttons are
+    # right underneath
+    txt = re.sub(r'\s*Reply \*yes\*[^\n]*', '', txt).rstrip()
+    if chat not in PENDING:            # rejected - too small, nothing held, etc
+        return (txt, _ikb([[('\u2B05 Back', 'ty:' + sym),
+                            ('\u274C Cancel', 'tx')]]))
+    back = ('ty:%s:%s' % (v, sym)) if side == 'sell' else ('ty:' + sym)
+    return (txt, _ikb([[('\u2705  Place order', 'tgo')],
+                       [('\u2B05 Change', back),
+                        ('\u274C Cancel', 'tx')]]))
+
+
+def trade_callback(chat, data):
+    """Returns (text, keyboard) for a button press."""
+    st = TRADE.setdefault(chat, {'venue': 'fut'})
+    if data == 'tx':
+        TRADE.pop(chat, None); PENDING.pop(chat, None)
+        return ('Cancelled. Nothing was placed.', None)
+    if data == 'tstart':
+        return trade_menu(chat)
+    if data == 'tb':
+        return trade_symbols(chat, 'buy')
+    if data == 'ts':
+        return trade_symbols(chat, 'sell')
+    if data == 'tback':
+        return trade_menu(chat)
+    if data == 'tv':
+        st['venue'] = 'spot' if st.get('venue', 'fut') == 'fut' else 'fut'
+        sym = st.get('sym')
+        # a perp symbol may not exist on spot and vice versa
+        if sym:
+            moved = same_coin_on(sym, st['venue'])
+            if not moved:
+                return ('%s is not tradable on %s.'
+                        % (short_sym(sym), st['venue']),
+                        _ikb([[('\U0001F501 back', 'tv'), ('\u274C Cancel', 'tx')]]))
+            st['sym'] = moved
+            return trade_sizes(chat, moved)
+        return trade_menu(chat)
+    if data.startswith('ty:'):
+        arg = data[3:]
+        if ':' in arg:                       # 'spot:GIGGLEUSDT'
+            v, sym = arg.split(':', 1)
+            st['venue'] = v
+            return trade_sizes(chat, sym)
+        return trade_sizes(chat, arg)
+    if data.startswith('tz:'):
+        return trade_preview(chat, float(data[3:]))
+    if data == 'tgo':
+        out = do_confirm(chat)
+        TRADE.pop(chat, None)
+        return (out, None)
+    return ('Not sure what that button was.', None)
+
+
 def handle(chat, text):
     """Returns (reply, keyboard)."""
     try:
         r = parse(chat, text)
     except Exception as e:
         return ('Something went wrong: %s' % e, MENU)
+    if isinstance(r, tuple):             # ('__TRADE__', None) sentinel
+        r = r[0]
+    if r == '__TRADE__':
+        return trade_menu(chat)          # inline picker, not the text menu
     if not r:
         r = ("I didn't catch that. Tap a button below, or type things like:"
              + NL + '   *buy 100 doge*   *sell btc*   *spot buy 200 sol*'
@@ -1292,6 +1483,33 @@ def main():
         try:
             for u in tg(token, 'getUpdates', offset=offset, timeout=30).get('result', []):
                 offset = u['update_id'] + 1
+                # ── a button on a message was tapped ──────────────────────
+                cq = u.get('callback_query')
+                if cq:
+                    cchat = str((cq.get('message') or {}).get('chat', {}).get('id', ''))
+                    if cchat and cchat == conf().get('CHAT', cchat):
+                        try:
+                            tg(token, 'answerCallbackQuery',
+                               callback_query_id=cq.get('id', ''))
+                        except Exception:
+                            pass
+                        try:
+                            txt, kb = trade_callback(cchat, cq.get('data', ''))
+                        except Exception as e:
+                            txt, kb = ('That did not work: %s' % e, None)
+                        mid = (cq.get('message') or {}).get('message_id')
+                        p = dict(chat_id=cchat, message_id=mid,
+                                 parse_mode='Markdown', text=txt[:4000])
+                        if kb:
+                            p['reply_markup'] = kb
+                        try:
+                            # edit in place so the chat stays one clean card
+                            tg(token, 'editMessageText', **p)
+                        except Exception:
+                            tg(token, 'sendMessage', chat_id=cchat,
+                               parse_mode='Markdown', text=txt[:4000],
+                               **({'reply_markup': kb} if kb else {}))
+                    continue
                 msg = u.get('message') or {}
                 chat = str(msg.get('chat', {}).get('id', ''))
                 if not chat: continue
