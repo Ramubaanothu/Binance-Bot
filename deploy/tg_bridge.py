@@ -175,6 +175,45 @@ def my_position(sym, venue='fut'):
             return float(p['positionAmt']), float(p['entryPrice'])
     return 0.0, 0.0
 
+# Binance's asset table is crypto-only, so the tokenized equities and
+# commodities main trades need naming here. Short and stable enough to keep
+# by hand; everything crypto still comes from the exchange.
+EQUITY_NAMES = {
+    'gold': 'XAU', 'silver': 'XAG',
+    'nvidia': 'NVDA', 'tesla': 'TSLA', 'google': 'GOOGL', 'alphabet': 'GOOGL',
+    'meta': 'META', 'facebook': 'META', 'intel': 'INTC', 'palantir': 'PLTR',
+    'microstrategy': 'MSTR', 'strategy': 'MSTR', 'circle': 'CRCL',
+    'coinbase': 'COIN', 'amazon': 'AMZN', 'robinhood': 'HOOD',
+    'apple': 'AAPL', 'microsoft': 'MSFT', 'netflix': 'NFLX', 'amd': 'AMD',
+    'nasdaq': 'QQQ', 'sp500': 'SPY', 's&p': 'SPY', 'sandp': 'SPY',
+}
+
+_names, _names_ts = {}, 0.0
+
+def asset_names():
+    """{'uniswap': 'UNI', ...} straight from Binance's own asset table, so
+    there is no hardcoded list to drift out of date. Cached 6 hours."""
+    global _names, _names_ts
+    if _names and time.time() - _names_ts < 21600:
+        return _names
+    m = {}
+    try:
+        req = urllib.request.Request(
+            'https://www.binance.com/bapi/asset/v2/public/asset/asset/'
+            'get-all-asset', headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            for a in json.loads(r.read()).get('data') or []:
+                code, name = a.get('assetCode'), a.get('assetName')
+                if not (code and name):
+                    continue
+                m[name.lower().replace(' ', '')] = code.upper()
+                m[code.lower()] = code.upper()
+    except Exception:
+        pass
+    if m:
+        _names, _names_ts = m, time.time()
+    return _names
+
 def resolve_symbol(word, venue='fut'):
     """'doge' -> DOGEUSDT. Accepts full symbols, bare bases, 1000-prefixed."""
     w = word.upper().strip()
@@ -184,6 +223,11 @@ def resolve_symbol(word, venue='fut'):
     for cand in cands:
         if cand in syms:
             return cand
+    # not a ticker - try it as a NAME ('uniswap' -> UNI)
+    key = word.lower().strip().replace(' ', '')
+    code = EQUITY_NAMES.get(key) or asset_names().get(key)
+    if code and code != w:
+        return resolve_symbol(code, venue)
     return None
 
 # ── monitoring ────────────────────────────────────────────────────────────
@@ -435,6 +479,37 @@ def guard(sym, venue='fut'):
         return '⚠️ Heads up: USDC pairs belong to the reverse bot.'
     return None
 
+def day_range(sym, venue='fut'):
+    """Current price plus the 24h range. A bare price tells you nothing about
+    whether you are buying the top or the bottom of the day."""
+    path = '/api/v3/ticker/24hr' if venue == 'spot' else '/fapi/v1/ticker/24hr'
+    try:
+        d = binance('GET', path, {'symbol': sym}, venue=venue)
+        return dict(last=float(d['lastPrice']), hi=float(d['highPrice']),
+                    lo=float(d['lowPrice']),
+                    chg=float(d.get('priceChangePercent', 0) or 0))
+    except Exception:
+        return None
+
+def range_bar(lo, hi, at, width=11):
+    """low |----o------| high  - where 'at' sits in the day's range."""
+    if hi <= lo:
+        return ''
+    pos = min(max((at - lo) / (hi - lo), 0.0), 1.0)
+    i = int(round(pos * (width - 1)))
+    return '`' + ('-' * i) + 'o' + ('-' * (width - 1 - i)) + '`'
+
+def where_in_range(pos_pct):
+    if pos_pct >= 0.85:
+        return 'at the day high'
+    if pos_pct >= 0.65:
+        return 'upper part of the day'
+    if pos_pct <= 0.15:
+        return 'at the day low'
+    if pos_pct <= 0.35:
+        return 'lower part of the day'
+    return 'mid-range'
+
 def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra='',
             ambiguous=None, venue='fut'):
     PENDING[chat] = dict(action=action, sym=sym, side=side, qty=qty,
@@ -449,6 +524,16 @@ def preview(chat, action, sym, side, qty, px, limit, sl, warn, extra='',
         lines.append('   🛑 stop-loss %g  (risk ≈ $%s)' % (sl, format(risk, ',.2f')))
     else:
         lines.append('   ⚠️ no stop-loss')
+    d = day_range(sym, venue)
+    if d and d['hi'] > d['lo']:
+        at = limit or d['last']
+        pos_pct = (at - d['lo']) / (d['hi'] - d['lo'])
+        lines.append('')
+        lines.append('   now *%g*   %+.2f%% today' % (d['last'], d['chg']))
+        lines.append('   24h %g %s %g'
+                     % (d['lo'], range_bar(d['lo'], d['hi'], at), d['hi']))
+        lines.append('   _%s_' % where_in_range(pos_pct))
+        lines.append('')
     if extra:
         lines.append('   ' + extra)
     if ambiguous is not None:
