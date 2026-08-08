@@ -4,12 +4,17 @@
 Run on the droplet:
     cd /home/bots/telegram && /home/bots/venv/bin/python test_tg_bridge.py
 
-Every case below is something that actually broke in a live chat. Previews are
-generated but never confirmed, so no order is placed.
+Every case below is something that actually broke in a live chat.
 
-NOT covered here on purpose: pause / resume / restart. Those write flag files
-and really do stop the bots - running them as a "test" once paused reverse for
-a minute. Test them deliberately, not in a sweep.
+NOTHING HERE MAY HAVE A SIDE EFFECT. Previews are generated but must never be
+confirmed. This has bitten twice: a 'pause reverse bot' case really paused the
+bot for a minute, and a 'YES, place it' case really bought 100 UNI because two
+earlier cases in the same chat id had left a preview pending.
+
+So: confirmation is only ever tested on a chat id with nothing pending, and
+pause / resume / restart are not covered here at all. Test those deliberately.
+
+After a run the suite asserts no orders were left behind.
 """
 import importlib.util, os, re, sys
 
@@ -54,7 +59,12 @@ CASES = [
     # ── the bugs from the 8 Aug screenshots ──────────────────────────────
     ('h', 'buy 100 uni at 3.97', r'BUY UNIUSDT',              None),
     ('h', 'Qty',                 r'\*100 units\*',            r"didn't catch"),
-    ('h', '✅ YES, place it', r'Placed|Filled|expired|Nothing waiting', None),
+    # Deliberately a chat with NOTHING pending. Confirming after the two
+    # cases above would PLACE A REAL ORDER - it did, once: UNIUSDT 100 units.
+    # This still proves the button's label is recognised as a confirmation,
+    # because an unrecognised label falls through to the symbol guesser
+    # instead of reaching do_confirm.
+    ('yes-btn', '✅ YES, place it', r'Nothing waiting', r"didn't catch"),
     ('i', 'Spot uni 100qty @3.9', r'SPOT',                    r'What you are trading'),
     ('i', 'uni 50qty',           r'\*50 units\*',             None),
     ('i', 'uniswap',             r'UNIUSDT',                  None),
@@ -100,5 +110,20 @@ for chat, msg, want, avoid in CASES:
         print('ok     %-22s %s' % (msg, r.split(chr(10))[0][:52]))
 
 print()
+# A test run must not leave anything on the exchange. This exists because a
+# confirmation case once slipped through and bought 100 UNI.
+try:
+    left = [o for o in m.binance('GET', '/fapi/v1/openOrders', auth=True)]
+    if left:
+        fails += 1
+        print('LEAK   the run left %d order(s) on the exchange: %s'
+              % (len(left), ', '.join('%s %s' % (o['symbol'], o['origQty'])
+                                      for o in left)))
+        print('       cancel them before trusting this run.')
+    else:
+        print('clean  no orders left on the exchange')
+except Exception as e:
+    print('note   could not verify open orders: %s' % e)
+
 print('%d/%d passed' % (len(CASES) - fails, len(CASES)))
 sys.exit(1 if fails else 0)
