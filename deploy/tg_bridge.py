@@ -1060,12 +1060,27 @@ def parse(chat, text):
         return None
     bare = t.lstrip('/')
 
-    if bare in YES or t in YES:
+    # The buttons send their whole label - 'yes, place it' / 'cancel'. An
+    # exact-match set only knew 'yes', so the confirm button was dead.
+    head = re.split(r'[\s,!.]+', bare)[0] if bare else ''
+    short = len(bare.split()) <= 4
+    if bare in YES or t in YES or (short and head in YES):
         return do_confirm(chat)
-    if bare in NO or t in NO:
+    if bare in NO or t in NO or (short and head in NO):
         return 'Cancelled.' if PENDING.pop(chat, None) else 'Nothing to cancel.'
     if bare in ('start', 'help', 'commands') or 'what can you do' in t:
         return HELP
+
+    # 'qty' on its own answers the preview's own suggestion - re-run the
+    # last trade reading its number as UNITS instead of dollars
+    if re.fullmatch(r'(qty|units?|coins?|in units)', t):
+        last = LAST.get(chat, {})
+        amt = last.get('usd')
+        if last.get('sym') and amt:
+            fn = do_sell if last.get('act') == 'sell' else do_buy
+            return fn(chat, last['sym'], None, last.get('limit'),
+                      last.get('sl'), amt, False, last.get('venue', 'fut'))
+        return ('How many units, and of what? e.g. `5 qty sol`')
 
     # a size on its own continues whatever we were just doing
     bs = bare_size(t)
@@ -1105,7 +1120,11 @@ def parse(chat, text):
     if re.search(r'\b(perp|perpetual|futures|spot|margin|leverage|'
                  r'what market|which market|what am i trading)', t) \
             and not re.search(r'\b(buy|sell|wallet|balance|holding|order|'
-                              r'pending|position|account|cancel|bot)', t):
+                              r'pending|position|account|cancel|bot)', t) \
+            and not re.search(NUM, t):
+        # a message carrying numbers is an order, not a question about
+        # which market this is - 'spot uni 100qty @3.9' was being answered
+        # with the venue explainer
         return venue_info()
 
     # A named day is checked BEFORE the all-time report, otherwise "yesterday
@@ -1168,6 +1187,19 @@ def parse(chat, text):
     # trading intent
     sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)', t))
     buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter|get)', t))
+    # 'spot uni 100qty @3.9' names a coin, a size and a price but no verb.
+    # That is an order, so inherit whatever we were last doing (buy by
+    # default) rather than dead-ending on it.
+    if not (buy or sell) and re.search(NUM, t) and re.search(
+            r'qty|unit|coin|@|\$|\bat\b', t):
+        # NB no \b around these: '100qty' has no boundary between the 0 and
+        # the q, and '@' is not a word character at all - the first version
+        # matched neither, so 'spot uni 100qty @3.9' still fell through.
+        for w in re.findall(r'[a-z0-9]+', t):
+            if resolve_symbol(w, 'spot' if 'spot' in t else 'fut'):
+                sell = (recall(chat, 'act') == 'sell')
+                buy = not sell
+                break
     if not (buy or sell):
         # ── nothing matched: guess what they meant rather than dead-end ──
         words = set(re.findall(r'[a-z0-9]+', t))
@@ -1281,7 +1313,8 @@ def parse(chat, text):
     # Record BEFORE dispatching, so even a rejected attempt (below the
     # minimum size, say) can be retried by replying with just a number.
     remember_intent(chat, sym=sym, act=('sell' if sell else 'buy'),
-                    limit=limit, sl=sl, venue=venue)
+                    limit=limit, sl=sl, venue=venue,
+                    usd=(usd if usd is not None else qty_units))
     return (do_sell if sell else do_buy)(chat, sym, usd, limit, sl,
                                          qty_units, ambiguous, venue) + carried
 

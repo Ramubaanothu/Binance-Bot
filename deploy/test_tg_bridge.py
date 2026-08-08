@@ -51,6 +51,16 @@ CASES = [
     ('e', 'spot orders',       r'spot orders',               r'What you are trading'),
     ('e', 'what am i trading', r'What you are trading',      None),
 
+    # ── the bugs from the 8 Aug screenshots ──────────────────────────────
+    ('h', 'buy 100 uni at 3.97', r'BUY UNIUSDT',              None),
+    ('h', 'Qty',                 r'\*100 units\*',            r"didn't catch"),
+    ('h', '✅ YES, place it', r'Placed|Filled|expired|Nothing waiting', None),
+    ('i', 'Spot uni 100qty @3.9', r'SPOT',                    r'What you are trading'),
+    ('i', 'uni 50qty',           r'\*50 units\*',             None),
+    ('i', 'uniswap',             r'UNIUSDT',                  None),
+    ('i', 'buy 300 gold',        r'XAUUSDT',                  None),
+    ('i', '❌ Cancel',       r'ancel',                    None),
+
     # ── day reports (a 00:0x 'today' used to just say nothing) ───────────
     ('g', 'today',             r'Today',                     None),
     ('g', 'yesterday',         r'Yesterday',                 r'Trade report'),
