@@ -1465,22 +1465,25 @@ class AlphaBot:
         }
 
     def dynamic_leverage(self, sym: str, atr_pct: float, conf: float) -> int:
-        """Volatility-adjusted leverage: calm coins earn more, wild coins get less.
-        atr_pct is the coin's own 5m ATR as % of price — its recent volatility."""
-        if sym in config.MAJOR_LEVERAGE:
-            # BTC/ETH/etc: deep liquidity, keep premium leverage but trim if unusually wild
-            base = config.MAJOR_LEVERAGE[sym]
-            if atr_pct > 1.0: base = max(10, base - 5)
-            return base
-        if   atr_pct <= 0.50: base = 12   # very calm — tight, predictable moves
-        elif atr_pct <= 0.90: base = 10   # normal
-        elif atr_pct <= 1.50: base = 7    # lively
-        elif atr_pct <= 2.50: base = 5    # volatile
-        else:                 base = 3    # wild meme-coin territory
-        if   conf >= 75: base += 2        # strong signal earns a little extra
-        elif conf <  60: base -= 1        # weak signal gets trimmed
-        return max(2, min(base, 15))
+        """Leverage is chosen so the STOP CLEARS THE NOISE, nothing else.
 
+        A SL_MAX_ROI stop is a price move of SL_MAX_ROI/leverage. If that is
+        inside one ATR, chop takes the trade out regardless of the signal -
+        which is what the sub-15-minute losers were (ATR 0.85% vs a 0.78%
+        stop). So solve for the leverage that puts the stop outside K ATRs.
+
+        Capped at LEV_MAX because fees scale with leverage: a round trip
+        costs 0.08*L % of margin, so the break-even hit rate is 51.7% at 3x,
+        55.7% at 10x and 64.3% at 25x. Measured baseline is ~52.7%.
+        """
+        sl_roi = float(getattr(config, 'SL_MAX_ROI', 7.0))
+        k      = float(getattr(config, 'LEV_ATR_MULT', 1.5))
+        cap    = int(getattr(config, 'LEV_MAX', 8))
+        a      = max(float(atr_pct or 0.0), 0.05)   # guard divide-by-zero
+        lev    = sl_roi / (k * a)
+        if conf and conf < 45:      # weak signal, give the stop more room
+            lev *= 0.8
+        return int(max(2, min(cap, lev)))
     def compute_exits(self, direction: str, entry: float, atr: float, sym: str = '') -> dict:
         sign   = +1 if direction == 'long' else -1
         is_maj = sym in config.MAJOR_LEVERAGE
