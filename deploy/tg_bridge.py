@@ -53,9 +53,10 @@ def _kb(rows, once=False):
                        'one_time_keyboard': once})
 
 # The everyday menu. Kept to six so the buttons stay wide enough to read.
-MENU = _kb([['\U0001F4CA Positions', '\U0001F4C5 Today'],
-            ['\U0001F4C8 Report',    '\U0001F4B0 Spot wallet'],
-            ['\U0001F5A5 Server',    '\u2753 Help']])
+MENU = _kb([['\U0001F4CA Positions',  '\U0001F4C5 Today'],
+            ['\U0001F4C6 Yesterday',  '\U0001F4C8 Report'],
+            ['\U0001F4B0 Spot wallet', '\U0001F4CB Orders'],
+            ['\U0001F5A5 Server',     '\u2753 Help']])
 
 # Shown ONLY while an order is waiting. Deliberately a different shape to
 # the menu, so 'yes' never lands where 'Positions' just was.
@@ -1062,6 +1063,49 @@ HELP = NL.join([
     'I always show a preview first — reply *yes* to place it, *no* to cancel.',
 ])
 
+# ── live notifications ────────────────────────────────────────────────────
+# The books are JSON files on disk. Snapshot them, and on every poll report
+# whatever changed. Seeded from the CURRENT state at boot so a restart never
+# replays history as if it just happened.
+_seen = {}
+
+def _snapshot():
+    snap = {}
+    for label, (d, posf, trf) in BOTS.items():
+        pos = jload(os.path.join(d, posf)).get('positions', {})
+        tr = jload(os.path.join(d, trf)).get('trades', [])
+        snap[label] = {
+            'open': {k: float(v.get('entry', 0) or 0) for k, v in pos.items()},
+            'closed': len(tr),
+            'last': tr[-1] if tr else None,
+        }
+    return snap
+
+def changes():
+    """Lines describing anything that opened or closed since last look."""
+    global _seen
+    out = []
+    now = _snapshot()
+    for label, cur in now.items():
+        old = _seen.get(label)
+        if old is None:
+            continue                     # first look: seed, announce nothing
+        paper = is_paper(BOTS[label][0])
+        tag = ' _(paper)_' if paper else ''
+        for sym, entry in cur['open'].items():
+            if sym not in old['open']:
+                out.append('\U0001F7E2 *%s opened* %s @ %g%s'
+                           % (label.upper(), sym, entry, tag))
+        if cur['closed'] > old['closed'] and cur['last']:
+            t = cur['last']
+            p = t.get('pnl_usd', 0) or 0
+            out.append('%s *%s closed* %s  %+.2f%%  $%+.2f  _%s_%s'
+                       % ('\u2705' if p > 0 else '\U0001F534', label.upper(),
+                          t.get('symbol', '?'), t.get('pnl_pct', 0) or 0, p,
+                          (t.get('reason') or '')[:22], tag))
+    _seen = now
+    return out
+
 def handle(chat, text):
     """Returns (reply, keyboard)."""
     try:
@@ -1082,6 +1126,7 @@ def main():
         if token: break
         time.sleep(30)
     print('polling', flush=True)
+    changes()          # seed: adopt current state without announcing it
     offset = 0
     while True:
         try:
@@ -1097,6 +1142,15 @@ def main():
                 reply, kb = handle(chat, msg.get('text', ''))
                 tg(token, 'sendMessage', chat_id=chat, parse_mode='Markdown',
                    reply_markup=kb, text=reply[:4000])
+            # push anything the bots did while we were waiting
+            bound = conf().get('CHAT', '')
+            if bound:
+                for line in changes():
+                    try:
+                        tg(token, 'sendMessage', chat_id=bound,
+                           parse_mode='Markdown', text=line[:4000])
+                    except Exception:
+                        pass
         except Exception as e:
             print('poll error: %s' % e, flush=True)
             time.sleep(10)
