@@ -53,9 +53,9 @@ def _kb(rows, once=False):
                        'one_time_keyboard': once})
 
 # The everyday menu. Kept to six so the buttons stay wide enough to read.
-MENU = _kb([['\U0001F4CA Positions',  '\U0001F4C5 Today'],
-            ['\U0001F4C6 Yesterday',  '\U0001F4C8 Report'],
-            ['\U0001F4B0 Spot wallet', '\U0001F4CB Orders'],
+MENU = _kb([['\U0001F4CA Positions',  '\U0001F4BC Balance'],
+            ['\U0001F4C5 Today',      '\U0001F4C6 Yesterday'],
+            ['\U0001F4C8 Report',     '\U0001F4CB Orders'],
             ['\U0001F5A5 Server',     '\u2753 Help']])
 
 # Shown ONLY while an order is waiting. Deliberately a different shape to
@@ -269,6 +269,138 @@ def fmt_manual():
     lines.append('   \u26A0 no stop-loss - say *sell %s* to close'
                  % rows[0]['sym'].replace('USDT', '').lower())
     return NL.join(lines)
+
+def money(x, dp=0):
+    return ('-$' if x < 0 else '$') + format(abs(x), ',.%df' % dp)
+
+def signed(x, dp=0):
+    return ('+' if x >= 0 else '-') + '$' + format(abs(x), ',.%df' % dp)
+
+def short_sym(s):
+    """1000PEPEUSDC -> 1000PEPE. The quote asset is the same all the way
+    down a column, so printing it 8 times just costs width."""
+    for q in ('USDT', 'USDC'):
+        if s.endswith(q):
+            return s[:-len(q)]
+    return s
+
+def price_map(venue='fut'):
+    """Every price in one call. Position files carry a P&L that is only as
+    fresh as that bot's last loop - spot's showed +0.0% on seven bags."""
+    try:
+        d = binance('GET', VENUE[venue]['tick'], venue=venue)
+        return {x['symbol']: float(x['price']) for x in d}
+    except Exception:
+        return {}
+
+def live_pnl(sym, p, px):
+    """(pct, usd) from the CURRENT price, falling back to the stored value."""
+    e = float(p.get('entry', 0) or 0)
+    q = float(p.get('qty', 0) or 0)
+    if not (px and e and q):
+        return (p.get('pnl_pct', 0) or 0), (p.get('pnl_usd', 0) or 0)
+    sign = -1.0 if str(p.get('direction', '')).lower() == 'short' else 1.0
+    usd = sign * (px - e) * q
+    lev = float(p.get('leverage', 1) or 1)
+    return sign * (px - e) / e * 100 * lev, usd
+
+def fmt_positions():
+    """ONLY what is open. No history, no totals, no lifetime stats."""
+    blocks, n = [], 0
+    fut_px, spot_px = price_map('fut'), price_map('spot')
+    for label in BOTS:
+        d, posf, _ = BOTS[label]
+        pos = jload(os.path.join(d, posf)).get('positions', {})
+        if not pos:
+            continue
+        n += len(pos)
+        pm = spot_px if label == 'spot' else fut_px
+        scored = []
+        for sym, p in pos.items():
+            scored.append((sym, p) + live_pnl(sym, p, pm.get(sym)))
+        lines = []
+        for sym, p, pct, usd in sorted(scored, key=lambda r: r[3]):
+            lev = p.get('leverage')
+            risk = '' if (p.get('sl') or p.get('trail_sl')) else ' !'
+            lines.append('%-9s %-5s %-4s %+6.1f%% %8s%s'
+                         % (short_sym(sym)[:9],
+                            str(p.get('direction', ''))[:5],
+                            ('%gx' % lev) if lev else '',
+                            pct, signed(usd), risk))
+        head = '*%s*' % label.upper()
+        if is_paused(label):
+            head += '  \u23F8 paused'
+        blocks.append(head + NL + '`' + (NL.join(lines)) + '`' + NL)
+    if not blocks:
+        return '\U0001F4CA *Open positions*' + NL + NL + '   Nothing open.'
+    out = ['\U0001F4CA *Open positions*  (%d)' % n, ''] + blocks
+    if any('!' in b for b in blocks):
+        out += ['', '_!  = no stop-loss on that position_']
+    mine = fmt_manual()
+    if mine:
+        out += ['', mine]
+    return NL.join(out)
+
+def book_equity():
+    """Equity per book. main/reverse are futures margin scoped to their own
+    quote asset; spot is cash plus the market value of the coins held."""
+    out = {}
+    try:
+        for a in binance('GET', '/fapi/v2/account', auth=True).get('assets', []):
+            if a['asset'] == 'USDT':
+                out['main'] = float(a.get('marginBalance', 0) or 0)
+            elif a['asset'] == 'USDC':
+                out['reverse'] = float(a.get('marginBalance', 0) or 0)
+    except Exception:
+        pass
+    try:
+        tot = 0.0
+        for b in binance('GET', '/api/v3/account', auth=True,
+                         venue='spot').get('balances', []):
+            q = float(b.get('free', 0)) + float(b.get('locked', 0))
+            if q <= 0:
+                continue
+            if b['asset'] in ('USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD'):
+                tot += q
+            else:
+                try:
+                    tot += q * mark(b['asset'] + 'USDT', 'spot')
+                except Exception:
+                    pass
+        out['spot'] = tot
+    except Exception:
+        pass
+    return out
+
+def fmt_balance():
+    """ONLY the money: what it is worth, and what today did to it."""
+    eq = book_equity()
+    today = time.strftime('%Y-%m-%d')
+    total = sum(eq.values())
+    day, rows, deployed = 0.0, [], 0.0
+    for label in BOTS:
+        d, posf, trf = BOTS[label]
+        tt = [t for t in jload(os.path.join(d, trf)).get('trades', [])
+              if t.get('close_date') == today]
+        pnl = sum(t.get('pnl_usd', 0) or 0 for t in tt)
+        if not is_paper(d):
+            day += pnl
+        pos = jload(os.path.join(d, posf)).get('positions', {})
+        # MARGIN, not notional. size_usd is the full position value, so at 8x
+        # a $400 margin position reads as $3,200 - summing that against equity
+        # claimed 69% deployed when the real figure was a fraction of it.
+        deployed += sum(float(p.get('size_usd', 0) or 0)
+                        / float(p.get('leverage', 1) or 1) for p in pos.values())
+        rows.append('%-8s %10s %9s' % (label, money(eq.get(label, 0)),
+                                       signed(pnl)))
+    arrow = '\u25B2' if day >= 0 else '\u25BC'
+    out = ['\U0001F4BC *%s*    %s %s today' % (money(total), arrow, signed(day)),
+           '', '`' + NL.join(rows) + '`']
+    if total > 0:
+        out += ['', '`margin used  %-10s (%.0f%%)`'
+                % (money(deployed), deployed / total * 100),
+                '`free         %-10s`' % money(total - deployed)]
+    return NL.join(out)
 
 def all_bots():
     parts = [fmt_bot(b) for b in BOTS]
@@ -909,9 +1041,11 @@ def parse(chat, text):
             continue                      # handled just above
         if re.search(r'\b' + name + r'\b', t):
             return fmt_bot(name)
-    if re.search(r'\b(position|status|doing|pnl|p&l|profit|balance|how are|'
-                 r'summary|report|show|update)', t):
-        return all_bots()
+    if re.search(r'\b(balance|equity|wallet|worth|how much|money|capital)', t):
+        return fmt_balance()
+    if re.search(r'\b(position|open|holding|status|doing|pnl|p&l|profit|'
+                 r'how are|summary|show|update)', t):
+        return fmt_positions()
 
     # Which book? Demo Trading is one account on two hosts, so the only
     # thing that decides this is the wording.
@@ -1092,17 +1226,43 @@ def changes():
             continue                     # first look: seed, announce nothing
         paper = is_paper(BOTS[label][0])
         tag = ' _(paper)_' if paper else ''
+        pos = jload(os.path.join(BOTS[label][0], BOTS[label][1])).get('positions', {})
         for sym, entry in cur['open'].items():
-            if sym not in old['open']:
-                out.append('\U0001F7E2 *%s opened* %s @ %g%s'
-                           % (label.upper(), sym, entry, tag))
+            if sym in old['open']:
+                continue
+            p = pos.get(sym, {})
+            lev = p.get('leverage')
+            size = float(p.get('size_usd', 0) or 0)
+            sl = p.get('sl')
+            bits = ['\U0001F7E2 *OPENED*  %s%s' % (label, tag),
+                    '`%s  %s%s`' % (short_sym(sym),
+                                    str(p.get('direction', '')).upper(),
+                                    ('  %gx' % lev) if lev else '')]
+            bits.append('`entry %-10.6g size %s`' % (entry, money(size)))
+            if sl:
+                risk = abs(entry - float(sl)) / entry * 100 * (lev or 1)
+                bits.append('`stop  %-10.6g risk %.1f%%`' % (float(sl), risk))
+            else:
+                bits.append('`no stop-loss`')
+            out.append(NL.join(bits))
         if cur['closed'] > old['closed'] and cur['last']:
             t = cur['last']
             p = t.get('pnl_usd', 0) or 0
-            out.append('%s *%s closed* %s  %+.2f%%  $%+.2f  _%s_%s'
-                       % ('\u2705' if p > 0 else '\U0001F534', label.upper(),
-                          t.get('symbol', '?'), t.get('pnl_pct', 0) or 0, p,
-                          (t.get('reason') or '')[:22], tag))
+            today = time.strftime('%Y-%m-%d')
+            tr = jload(os.path.join(BOTS[label][0], BOTS[label][2])).get('trades', [])
+            tt = [x for x in tr if x.get('close_date') == today]
+            w = len([x for x in tt if (x.get('pnl_usd') or 0) > 0])
+            held = t.get('held_min') or 0
+            hh = ('%dm' % held) if held < 60 else ('%.1fh' % (held / 60.0))
+            out.append(NL.join([
+                '%s *CLOSED*  %s   %s%s'
+                % ('\u2705' if p > 0 else '\U0001F534', label, signed(p, 2), tag),
+                '`%s  %+.2f%%  held %s`'
+                % (short_sym(t.get('symbol', '?')), t.get('pnl_pct', 0) or 0, hh),
+                '`%s`' % (t.get('reason') or '')[:28],
+                '`today %s   %dW %dL`'
+                % (signed(sum(x.get('pnl_usd') or 0 for x in tt), 2),
+                   w, len(tt) - w)]))
     _seen = now
     return out
 
