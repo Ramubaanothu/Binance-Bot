@@ -214,8 +214,22 @@ def asset_names():
         _names, _names_ts = m, time.time()
     return _names
 
+# Real Binance tickers that are also ordinary English words. "why did sol
+# close" resolved WHY -> 1000WHYUSDT and opened a short on it. A bare word
+# from this list is never a coin; say "buy why" if you really mean the coin.
+WORD_TICKERS = {
+    'why', 'what', 'when', 'who', 'how', 'all', 'any', 'me', 'my', 'it', 'a',
+    'in', 'on', 'at', 'to', 'of', 'is', 'are', 'do', 'id', 'go', 'up', 'we',
+    'best', 'worst', 'half', 'some', 'more', 'less', 'new', 'now', 'not',
+    'and', 'the', 'for', 'you', 'can', 'did', 'has', 'was', 'one', 'two',
+    'win', 'run', 'top', 'low', 'high', 'open', 'close', 'sell', 'buy',
+    'time', 'day', 'week', 'move', 'trade', 'cash', 'gas', 'hot', 'safe',
+}
+
 def resolve_symbol(word, venue='fut'):
     """'doge' -> DOGEUSDT. Accepts full symbols, bare bases, 1000-prefixed."""
+    if word.lower().strip() in WORD_TICKERS:
+        return None
     w = word.upper().strip()
     syms = _load_filters(venue)['syms']
     cands = ((w, w + 'USDT', w + 'USDC') if venue == 'spot'
@@ -1066,7 +1080,10 @@ def parse(chat, text):
     short = len(bare.split()) <= 4
     if bare in YES or t in YES or (short and head in YES):
         return do_confirm(chat)
-    if bare in NO or t in NO or (short and head in NO):
+    if (bare in NO or t in NO or (short and head in NO)) \
+            and not re.search(r'\bbot\b|\btrading\b', t):
+        # 'stop the spot bot' is a pause, not a cancellation - 'stop' being
+        # in the NO set meant it answered 'Cancelled.'
         return 'Cancelled.' if PENDING.pop(chat, None) else 'Nothing to cancel.'
     if bare in ('start', 'help', 'commands') or 'what can you do' in t:
         return HELP
@@ -1098,6 +1115,47 @@ def parse(chat, text):
     if re.fullmatch(r'(hi|hey|hello|yo|good\s*(morning|evening|afternoon))!?', t):
         return ('Hey. ' + today_summary() + NL + NL +
                 '_Ask me for a report, positions, server status, or place a trade._')
+    # 'hows it going', 'everything ok', 'is everything running'
+    if re.search(r'\b(hows it going|how.s everything|everything ok|'
+                 r'everything alright|all good|everything running|'
+                 r'all running|you there|still alive)\b', t) \
+            and not re.search(r'\bserver\b', t):
+        alive = [b for b in BOTS if not is_paused(b)]
+        return (fmt_balance() + NL + NL +
+                '_%d of %d books taking entries._' % (len(alive), len(BOTS)))
+    # 'what did the bots do overnight' / 'last night'
+    if re.search(r'\b(overnight|last night|while i was asleep|'
+                 r'since yesterday)\b', t):
+        return day_block(time.strftime('%Y-%m-%d',
+                                       time.localtime(time.time() - 86400)),
+                         'Yesterday')[0] + NL + NL + today_summary()
+    # 'start again' after a pause
+    if re.fullmatch(r'(start( again| up)?|go again|resume everything|'
+                    r'carry on|back on)', t):
+        return do_resume(list(BOTS))
+    # 'whats my worst trade' / 'best trade'
+    if re.search(r'\b(worst|best)\b.*\b(trade|loss|win|day)\b', t) \
+            or re.search(r'\b(biggest)\b.*\b(loss|win|winner|loser)\b', t):
+        worst = re.search(r'\b(worst|biggest loss|biggest loser)\b', t)
+        rows = []
+        for label in BOTS:
+            d, _, trf = BOTS[label]
+            for x in jload(os.path.join(d, trf)).get('trades', []):
+                if x.get('pnl_usd') is not None:
+                    rows.append((x['pnl_usd'], label, x))
+        if not rows:
+            return 'No closed trades yet.'
+        # sort on the number only - equal P&L used to fall through to
+        # comparing the trade dicts, which raises TypeError
+        rows.sort(key=lambda r: r[0])
+        pick = rows[:5] if worst else rows[-5:][::-1]
+        out = ['*%s trades*' % ('Worst' if worst else 'Best'), '']
+        for pnl, label, x in pick:
+            out.append('`%-10s %-8s %+8.2f%%  %9s  %s`'
+                       % (short_sym(x.get('symbol', '?')), label,
+                          x.get('pnl_pct') or 0, signed(pnl, 2),
+                          x.get('close_date', '')))
+        return NL.join(out)
     if re.search(r'\b(thanks|thank you|thx|good job|nice)', t):
         return 'Anytime. Say *report* whenever you want the full picture.'
 
@@ -1170,11 +1228,45 @@ def parse(chat, text):
             continue                      # handled just above
         if re.search(r'\b' + name + r'\b', t):
             return fmt_bot(name)
+    # 'how much is btc' is a price question; only route to the wallet when
+    # no coin is named
+    _named = None
+    if re.search(r'\b(price|how much|what.s|worth|rate|quote)', t):
+        for _w in re.findall(r'[a-z0-9]+', t):
+            _named = resolve_symbol(_w)
+            if _named:
+                break
+    if _named and not re.search(r'\b(buy|sell|short|close)\b', t):
+        try:
+            remember(chat, sym=_named)
+            d = day_range(_named)
+            if d:
+                return ('*%s* is at *%g*   %+.2f%% today%s24h %g %s %g'
+                        % (_named, d['last'], d['chg'], NL,
+                           d['lo'], range_bar(d['lo'], d['hi'], d['last']),
+                           d['hi']))
+            return '*%s* is at %g' % (_named, mark(_named))
+        except Exception:
+            pass
     if re.search(r'\b(balance|equity|wallet|worth|how much|money|capital)', t):
         return fmt_balance()
     if re.search(r'\b(position|open|holding|status|doing|pnl|p&l|profit|'
                  r'how are|summary|show|update)', t):
         return fmt_positions()
+
+    if re.search(r'\b(close|sell|exit)\b.*\b(everything|all|the lot)\b', t) \
+            or re.fullmatch(r'(close|sell) (everything|all)', t):
+        held = held_symbols()
+        if not held:
+            return 'Nothing is open.'
+        lines = ['*Close everything?*', '']
+        for sym, v in sorted(held.items()):
+            lines.append('   %s  _%s_' % (short_sym(sym), v))
+        lines += ['', 'I do not close positions in bulk - a wrong bulk '
+                      'close cannot be undone.',
+                  'Close them one at a time, e.g. `close %s`.'
+                  % short_sym(sorted(held)[0]).lower()]
+        return NL.join(lines)
 
     # the tap-through flow: 'trade' on its own opens the picker
     if re.fullmatch(r'(trade|buy|sell|order)s?', t):
@@ -1184,12 +1276,70 @@ def parse(chat, text):
     # thing that decides this is the wording.
     venue = 'spot' if re.search(r'\bspot\b', t) else 'fut'
 
+    # "why did sol close" - answerable, and much better than a shrug
+    if re.match(r'(why|what)\b', t) and re.search(
+            r'\b(close|closed|exit|exited|stop|stopped|sell|sold)\b', t):
+        for _w in re.findall(r'[a-z0-9]+', t):
+            _s = resolve_symbol(_w)
+            if not _s:
+                continue
+            base = short_sym(_s)
+            hits = []
+            for label in BOTS:
+                d, _, trf = BOTS[label]
+                for x in jload(os.path.join(d, trf)).get('trades', []):
+                    if short_sym(x.get('symbol', '')) == base:
+                        hits.append((label, x))
+            if not hits:
+                return 'No closed trade on %s in any book.' % base
+            label, x = hits[-1]
+            held = x.get('held_min') or 0
+            return NL.join([
+                '*%s* - last close, %s book' % (base, label),
+                '',
+                '`%-9s %s`' % ('exit', (x.get('reason') or '?')),
+                '`%-9s %+.2f%%   %s`' % ('result', x.get('pnl_pct') or 0,
+                                         signed(x.get('pnl_usd') or 0, 2)),
+                '`%-9s %g -> %g`' % ('price', x.get('entry') or 0,
+                                     x.get('exit') or 0),
+                '`%-9s %s`' % ('held', ('%dm' % held) if held < 60
+                               else '%.1fh' % (held / 60.0)),
+                '`%-9s %s %s`' % ('when', x.get('close_date', ''),
+                                  x.get('close_time', '')),
+            ])
+
+    # A QUESTION IS NEVER AN ORDER. 'why did sol close' must not place a
+    # trade, whatever words it happens to contain.
+    # An interrogative opener makes it informational no matter what words
+    # follow: 'why did sol close' contains 'close', 'what should i buy'
+    # contains 'buy'. Exempting those was the hole that still shorted SOL.
+    hard_q = bool(re.match(r'(why|what|whats|when|who|which|how|hows|'
+                           r'is|are|am|do|does|did|should)\b', t)
+                  or t.endswith('?'))
+    # ...unless it is a polite instruction, which opens differently
+    polite = bool(re.match(r'(can|could|would|please|pls)\b', t))
+    asking = hard_q and not polite
+
     # trading intent
-    sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload)', t))
-    buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter|get)', t))
+    sell = bool(re.search(r'\b(sell|close|exit|dump|short|offload|'
+                          r'get rid of|got rid of)', t))
+    # 'get' removed: 'get rid of giggle' matched it and BOUGHT. 'get me X'
+    # is kept explicitly because that one really is a buy.
+    buy  = bool(re.search(r'\b(buy|long|purchase|grab|enter)\b', t)
+                or re.search(r'\bget (me|some|\d)', t))
+    if re.search(r'\bget rid of\b', t):
+        buy = False
     # 'spot uni 100qty @3.9' names a coin, a size and a price but no verb.
     # That is an order, so inherit whatever we were last doing (buy by
     # default) rather than dead-ending on it.
+    if asking:
+        buy = sell = False        # a question is never an order
+        if re.search(r'\b(should|shall|worth|recommend|advice|suggest|'
+                     r'good buy|which coin|what to)\b', t):
+            return ('I will not tell you what to buy - I am not able to give '
+                    'investment advice.' + NL + NL +
+                    'What I can do is show you the facts: `price sol`, '
+                    '`report`, `positions`, or `why did sol close`.')
     if not (buy or sell) and re.search(NUM, t) and re.search(
             r'qty|unit|coin|@|\$|\bat\b', t):
         # NB no \b around these: '100qty' has no boundary between the 0 and

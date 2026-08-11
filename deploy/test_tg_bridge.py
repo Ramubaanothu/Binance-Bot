@@ -71,6 +71,20 @@ CASES = [
     ('i', 'buy 300 gold',        r'XAUUSDT',                  None),
     ('i', '❌ Cancel',       r'ancel',                    None),
 
+    # ── natural phrasing: the DANGEROUS misreads, 11 Aug ─────────────────
+    # each of these confidently did the wrong thing before
+    ('n', 'why did sol close',  r'last close',            r'SHORT|BUY|Reply'),
+    ('n', 'get rid of giggle',  r'SELL|CLOSE|SHORT',      r'\*BUY'),
+    ('n', 'how much is btc',    r'BTCUSDT\* is at',       r'margin used'),
+    ('n', 'what should i buy',  r'not able to give',      r'Reply \*yes\*'),
+    ('n', 'close everything',   r'Close everything\?',    r'Reply \*yes\*'),
+    ('n', 'server status',      r'Server',                r'margin used'),
+    ('n', 'whats my worst trade', r'Worst trades',        None),
+    ('n', 'hows it going',      r'\$',                    r"didn't catch"),
+    ('n', 'what did the bots do overnight', r'Yesterday', r"didn't catch"),
+    # a literal backspace byte in any regex means a heredoc mangled a 
+    ('n', 'is sol worth buying', r'.',                    r"didn't catch"),
+
     # ── day reports (a 00:0x 'today' used to just say nothing) ───────────
     ('g', 'today',             r'Today',                     None),
     ('g', 'yesterday',         r'Yesterday',                 r'Trade report'),
