@@ -1254,8 +1254,11 @@ def parse(chat, text):
                  r'how are|summary|show|update)', t):
         return fmt_positions()
 
-    if re.search(r'\b(close|sell|exit)\b.*\b(everything|all|the lot)\b', t) \
-            or re.fullmatch(r'(close|sell) (everything|all)', t):
+    # 'sell tut all' means all of TUT, not all positions - so this only
+    # fires when NO specific coin is named
+    _bulk = (re.search(r'\b(close|sell|exit)\b.*\b(everything|all|the lot)\b', t)
+             or re.fullmatch(r'(close|sell) (everything|all)', t))
+    if _bulk and not any(resolve_symbol(w) for w in re.findall(r'[a-z0-9]+', t)):
         held = held_symbols()
         if not held:
             return 'Nothing is open.'
@@ -1459,6 +1462,24 @@ def parse(chat, text):
             # but flag it so the preview shows both readings
             ambiguous = True
             break
+
+    # A SELL follows the coin to the venue it is actually held on. Without
+    # this, 'sell tut' hit the perp book, found nothing, and opened a SHORT
+    # - TUT is a spot bag. The tap flow already did this; typing did not.
+    if sell and venue == 'fut' and not re.search(r'\b(short|perp|futures)\b', t):
+        try:
+            _held = held_symbols()
+            # the test is not 'is it held' but 'is it held HERE'. GIGGLE
+            # is held - on spot - so the old check skipped the reroute
+            # and still shorted it on the perp book.
+            if _held.get(sym) == 'spot':
+                venue = 'spot'
+            elif sym not in _held:
+                _alt = same_coin_on(sym, 'spot')
+                if _alt and _held.get(_alt) == 'spot':
+                    sym, venue = _alt, 'spot'
+        except Exception:
+            pass
 
     # Record BEFORE dispatching, so even a rejected attempt (below the
     # minimum size, say) can be retried by replying with just a number.

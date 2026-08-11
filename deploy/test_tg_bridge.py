@@ -85,6 +85,15 @@ CASES = [
     # a literal backspace byte in any regex means a heredoc mangled a 
     ('n', 'is sol worth buying', r'.',                    r"didn't catch"),
 
+    # ── 'sell tut all' didn't work, 11 Aug ─────────────────────────
+    # 'all' after a named coin means all OF IT, not all positions
+    ('s', 'sell giggle all',   r'GIGGLE',                r'Close everything'),
+    # a SELL must follow the coin to the venue it is held on - 'sell giggle'
+    # hit the perp book, found nothing, and offered to open a SHORT
+    ('s', 'sell giggle',       r'SPOT|locked|CLOSE',     r'SHORT'),
+    ('s', 'short giggle',      r'SHORT',                 None),
+    ('s', 'sell all',          r'Close everything',      None),
+
     # ── day reports (a 00:0x 'today' used to just say nothing) ───────────
     ('g', 'today',             r'Today',                     None),
     ('g', 'yesterday',         r'Yesterday',                 r'Trade report'),
