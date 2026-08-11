@@ -1717,13 +1717,19 @@ class AlphaBot:
                         # (e.g. 2026-07-15: SOL/ETH/BTC/BNB LONGed within 2 min,
                         # then one short-term pullback stopped out all 4).
                         chart_syms = set(getattr(config, 'CHART_SYMBOLS', ['BTCUSDT']))
+                        # NameError here: 'direction' is only bound inside
+                        # open_btc_chart_position, a different function. In THIS
+                        # scope the value lives in r['direction']. Every passing
+                        # signal raised, was swallowed by the loop's except, and
+                        # the entry was silently skipped - 244 times since 10 Aug.
+                        _dir = r['direction']
                         same_dir_open = any(
-                            s in chart_syms and p.get('direction') == direction
+                            s in chart_syms and p.get('direction') == _dir
                             for s, p in self.positions.items() if s != _cs
                         )
                         if same_dir_open:
-                            self.emit('info', f"📊 {_cs.replace('USDT','')} {direction.upper()} skipped — "
-                                               f"correlated major already open {direction}")
+                            self.emit('info', f"📊 {_cs.replace('USDT','')} {_dir.upper()} skipped — "
+                                               f"correlated major already open {_dir}")
                             continue
                         await self.open_btc_chart_position(r)
                 await self.push()
@@ -1739,7 +1745,15 @@ class AlphaBot:
         if time.time() < self._sym_cooldown.get(sym, 0): return
         direction = r['direction']
         conf      = min(95.0, abs(r['score']) / 2.5 * 100)
-        lev       = config.BTC_CHART_LEV
+        # Was a flat config.BTC_CHART_LEV (10). At 10x a 7% ROI stop is a
+        # 0.7% price move - inside BTC's own noise, the exact defect the
+        # scanner path was fixed for on 8 Aug. THIS path was missed: over
+        # the next 3 days reverse correctly used 8x on 10 trades while
+        # main placed all 4 of its entries at 10x, because chart mode
+        # never called dynamic_leverage.
+        _atr_pct  = (r['atr'] / r['price'] * 100) if r.get('price') else 0.5
+        lev       = min(config.BTC_CHART_LEV,
+                        self.dynamic_leverage(sym, _atr_pct, conf))
 
         try:
             venue_px = self.client.price(sym)
