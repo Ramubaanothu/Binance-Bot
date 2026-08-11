@@ -1,0 +1,19 @@
+[Unit]
+Description=AlphaBot runner-signal paper logger (records only, places nothing)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bots
+WorkingDirectory=/home/bots/signals
+ExecStart=/home/bots/venv/bin/python /home/bots/signals/logger.py
+[Unit]
+Description=Run the runner-signal logger every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

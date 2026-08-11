@@ -471,6 +471,48 @@ def fmt_balance():
                 '`free         %-10s`' % money(total - deployed)]
     return NL.join(out)
 
+SIGNAL_LOG = '/home/bots/signals/runner_signal.jsonl'
+
+def signal_log():
+    """Progress of the paper-logged 'fade the runner' test. Places NOTHING.
+    It exists because the idea backtested at 65.9% on 138 samples that were
+    really only 19 distinct runs - error bar +/-11.5 on a 15-point edge."""
+    rows = []
+    try:
+        with open(SIGNAL_LOG, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+    except Exception:
+        return 'No signal log yet - the logger runs every 15 minutes.'
+    fin = [r for r in rows if r.get('result') in ('win', 'loss')]
+    w = sum(1 for r in fin if r['result'] == 'win')
+    n = len(fin)
+    fee = 0.08 * 8
+    be = (7.0 + fee) / ((8.0 - fee) + (7.0 + fee)) * 100
+    out = ['\U0001F9EA *Fade-the-runner test*   _paper only_', '']
+    out.append('`logged     %d episodes`' % len(rows))
+    out.append('`resolved   %d   (%dW %dL)`' % (n, w, n - w))
+    out.append('`still open %d`' % sum(1 for r in rows if r.get('result') is None))
+    if n:
+        p = w / n * 100.0
+        se = (0.25 / n) ** 0.5 * 100
+        out.append('`hit rate   %.1f%%  +/-%.1f`' % (p, se))
+        out.append('`need       %.1f%%  to clear costs`' % be)
+        out.append('')
+        out.append('_%d of ~50 episodes - too early to read._' % n if n < 40
+                   else ('_%s break-even._' % ('Ahead of' if p > be else 'Behind')))
+    else:
+        out += ['', '_Nothing resolved yet._']
+    watching = [r for r in rows if r.get('result') is None][-4:]
+    if watching:
+        out += ['', '*Watching now*']
+        for r in watching:
+            out.append('`%-11s +%.0f%% in 24h`' % (short_sym(r['symbol']),
+                                                   r['chg24']))
+    return NL.join(out)
+
 def all_bots():
     parts = [fmt_bot(b) for b in BOTS]
     mine = fmt_manual()
@@ -1248,6 +1290,8 @@ def parse(chat, text):
             return '*%s* is at %g' % (_named, mark(_named))
         except Exception:
             pass
+    if re.search(r'\b(signal|runner test|paper test|experiment|fade)\b', t):
+        return signal_log()
     if re.search(r'\b(balance|equity|wallet|worth|how much|money|capital)', t):
         return fmt_balance()
     if re.search(r'\b(position|open|holding|status|doing|pnl|p&l|profit|'
