@@ -767,6 +767,13 @@ class AlphaBot:
         max_move = (cap / lev) / 100.0                     # price fraction
         sign = 1 if direction == 'long' else -1
         sl_cap = entry * (1 - sign * max_move)
+        if getattr(config, 'SL_FIXED_ROI', False):
+            # FORCE the stop to exactly SL_MAX_ROI. Capping alone left a
+            # tight ATR stop in place (~6% ROI), so raising SL_MAX_ROI to
+            # 25% would have had no effect at all.
+            exits = dict(exits)
+            exits['sl'] = round(sl_cap, 10)
+            return exits
         if sign * (exits['sl'] - sl_cap) < 0:              # ATR stop wider than cap
             exits = dict(exits)
             exits['sl'] = round(sl_cap, 10)
@@ -2373,6 +2380,16 @@ class AlphaBot:
                 else:
                     _roi1, _sc1, _roi2 = config.TAKE_PROFIT_ROI_1, config.TAKE_PROFIT_ROI_1_SCALE, config.TAKE_PROFIT_ROI_2
                 # SCALP = FULL profit take at the first target (SCALE >= 1)
+                # TIME EXIT. The 25/25 edge was measured on a 24h hold and
+                # decays to break-even past it; nothing here closed on time
+                # before, so the tested condition needs this to exist.
+                _mh = getattr(config, 'MAX_HOLD_HOURS', 0)
+                if _mh and pos.get('open_ms'):
+                    _age_h = (time.time() * 1000 - pos['open_ms']) / 3600000.0
+                    if _age_h >= _mh:
+                        await self.close(sym, pos, pnl_pct,
+                                         f'TIME EXIT {_mh:g}h')
+                        continue
                 if not pos.get('runner') and _sc1 >= 0.999 and pnl_pct >= _roi1:
                     await self.close(sym, pos, pnl_pct, f"+{_roi1:.0f}% ROI FULL TP")
                     continue
