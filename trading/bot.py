@@ -767,6 +767,19 @@ class AlphaBot:
         max_move = (cap / lev) / 100.0                     # price fraction
         sign = 1 if direction == 'long' else -1
         sl_cap = entry * (1 - sign * max_move)
+        # The ATR take-profit rungs were sized for an 8% ROI target. With
+        # the target at 25% they sit FAR inside it - tp3 on a major lands
+        # near +1.9% ROI - and the management loop closes on tp3, so the
+        # 25% target was never reachable. When the ROI target governs the
+        # whole position, no rung may be tighter than it.
+        if getattr(config, 'TAKE_PROFIT_ROI_1_SCALE', 1.0) >= 0.999:
+            roi_tp = getattr(config, 'TAKE_PROFIT_ROI_1', 8.0)
+            tp_move = (roi_tp / lev) / 100.0
+            floor = entry * (1 + sign * tp_move)
+            exits = dict(exits)
+            for k in ('tp1', 'tp2', 'tp3'):
+                if k in exits and sign * (exits[k] - floor) < 0:
+                    exits[k] = round(floor, 10)
         if getattr(config, 'SL_FIXED_ROI', False):
             # FORCE the stop to exactly SL_MAX_ROI. Capping alone left a
             # tight ATR stop in place (~6% ROI), so raising SL_MAX_ROI to
@@ -2503,7 +2516,21 @@ class AlphaBot:
 
                 # Exit triggers
                 sl_hit  = sign * (pos['trail_sl'] - current) >= 0
-                tp3_hit = sign * (current - pos['tp3']) >= 0
+                # pos['tp3'] is the ATR rung stored at ENTRY. Positions opened
+                # before the target moved to 25% still carry the old value
+                # (~+5% ROI), and this check closed on it - which is why
+                # profits were booking tiny while the exchange order sat at
+                # the real target. Derive it from config instead of trusting
+                # what was written at entry.
+                _tp3 = pos['tp3']
+                if getattr(config, 'TAKE_PROFIT_ROI_1_SCALE', 1.0) >= 0.999:
+                    try:
+                        _roi_tp = self._roi_target_price(pos)
+                        if sign * (_tp3 - _roi_tp) < 0:
+                            _tp3 = _roi_tp
+                    except Exception:
+                        pass
+                tp3_hit = sign * (current - _tp3) >= 0
                 max_g   = pnl_pct >= config.MAX_GAIN_PCT
 
                 if tp3_hit:
