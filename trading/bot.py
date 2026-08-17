@@ -2474,17 +2474,22 @@ class AlphaBot:
                 if sign > 0: pos['peak'] = max(pos.get('peak', entry), current)
                 else:        pos['peak'] = min(pos.get('peak', entry), current)
 
-                # ── PROFIT RATCHET (ROI-based) — arms LATE, keeps most of the gain.
-                # Deliberately does NOT trail from the first tick: that is what cut
-                # winners to +1.4% while losers ran to -7%. It only prevents a deep
-                # round-trip once the trade is already well into profit, leaving
-                # room to reach the +8% ROI full-take target.
-                _arm  = getattr(config, 'PROFIT_RATCHET_ARM_ROI', 5.0)
-                _keep = getattr(config, 'PROFIT_RATCHET_KEEP', 0.60)
-                if _arm > 0 and lev_used > 0:
+                # ── PROFIT RATCHET — stepped, locks a floor as the trade runs.
+                #     peak +10% ROI -> lock +5%
+                #     peak +18% ROI -> lock +10%
+                #     peak +20% ROI -> lock +12%
+                # The floor only ever moves in the profitable direction, so a
+                # step once reached is never given back. The +25% target still
+                # takes the whole position if price gets there.
+                _steps = getattr(config, 'RATCHET_STEPS', ())
+                if _steps and lev_used > 0:
                     peak_roi = sign * (pos['peak'] / entry - 1) * 100 * lev_used
-                    if peak_roi >= _arm:
-                        floor_price = entry * (1 + sign * (peak_roi * _keep / lev_used) / 100)
+                    _lock = None
+                    for _trig, _floor in _steps:          # ascending: last match wins
+                        if peak_roi >= _trig:
+                            _lock = _floor
+                    if _lock is not None:
+                        floor_price = entry * (1 + sign * (_lock / lev_used) / 100)
                         if sign * (floor_price - pos['trail_sl']) > 0:
                             pos['trail_sl']  = round(floor_price, 8)
                             pos['ratcheted'] = True
