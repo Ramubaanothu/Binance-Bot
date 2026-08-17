@@ -232,6 +232,18 @@
   </div>
 </div>
 
+<div id="connBanner" style="background:var(--panel);border:1px solid var(--dn);
+  border-radius:10px;padding:18px 20px;margin-bottom:12px;">
+  <div style="font-size:15px;font-weight:600;color:var(--dn);margin-bottom:8px;">
+    Not connected to the bot</div>
+  <div style="font-size:13px;color:var(--dim);line-height:1.7;">
+    This dashboard reads live data over an SSH tunnel. Nothing is listening on
+    <b>localhost:8765</b> yet.<br><br>
+    <b>Fix:</b> double-click <b>DASHBOARDS.bat</b> in your Claude code folder and
+    leave the green window open, then refresh this page with Ctrl+F5.<br><br>
+    <span style="color:var(--faint);">Retrying automatically every 2.5s&hellip;</span>
+  </div>
+</div>
 <div class="panel" id="pauseBanner" style="display:none;border-color:var(--dn)">
   <span class="dn">⏸ TRADING PAUSED</span> — <span id="pauseWhy" class="dim"></span>
 </div>
@@ -618,6 +630,7 @@ $('keyHint').addEventListener('click', toggleHelp);
 let last = null;
 function render(d){
   last = d;
+  $('connBanner').style.display='none';
   if(frozen) return;   // 'P' freezes the view so you can read a moving table
   $('dot').className='dot';
   // header shows EQUITY (wallet + unrealised), not free margin
@@ -641,7 +654,7 @@ function connect(){
   ws.onmessage = function(e){
     try{ const d = JSON.parse(e.data); if(d.type==='state') render(d); }catch(_){}
   };
-  ws.onclose = function(){ $('dot').className='dot off'; setTimeout(connect, 2500); };
+  ws.onclose = function(){ $('dot').className='dot off'; $('connBanner').style.display='block'; setTimeout(connect, 2500); };
   ws.onerror = function(){ ws.close(); };
 }
 connect();
