@@ -39,9 +39,11 @@ import config
 
 # REVERSE EXPERIMENT: set ALPHABOT_REVERSE=1 → this process trades the EXACT
 # OPPOSITE of every signal, liberally gated, on USDC perps (separate wallet).
+import os
 import os as _os
 REVERSE = _os.environ.get('ALPHABOT_REVERSE') == '1'
 QUOTE   = 'USDC' if REVERSE else 'USDT'
+BOOK_NAME = 'main'
 
 from indicators import TAEngine, SignalResult
 
@@ -696,6 +698,8 @@ class AlphaBot:
             return
         # THE FLIP: whatever the strategy wants, do the opposite
         direction = 'short' if a['direction'] == 'long' else 'long'
+        if self.portfolio_blocks(direction):
+            return
         a = dict(a); a['direction'] = direction
         lev = 6                            # modest fixed leverage for the experiment
 
@@ -752,7 +756,7 @@ class AlphaBot:
         self._journal('entry', {'entry': entry, 'qty': qty, 'lev': lev,
                                 'flipped_from': 'long' if direction == 'short' else 'short',
                                 **self._feat(a)})
-        self.balance = self.client.usdt_balance(self.paper_balance)
+        self.balance = self.client.usdt_balance(self.paper_balance); self._refresh_shared_equity()
         self.emit('exec',
             f"🔄[REVERSE] {'LONG' if direction == 'long' else 'SHORT'} {sym} @ {entry:.6g} | "
             f"qty={qty} lev={lev}x | signal said {('LONG' if direction == 'short' else 'SHORT')} "
@@ -1504,6 +1508,97 @@ class AlphaBot:
         if conf and conf < 45:      # weak signal, give the stop more room
             lev *= 0.8
         return int(max(2, min(cap, lev)))
+
+    # ── PORTFOLIO EXPOSURE CAP ────────────────────────────────────────────
+    # Each bot used to police only its OWN book. Nothing saw the combined
+    # position, so three programs independently built $7,883 of one-way long
+    # beta on $15,700 of equity - none of them in breach of its own limit.
+    # This reads every book off disk and refuses an entry that would push net
+    # directional exposure past MAX_PORTFOLIO_EXPOSURE_PCT of total equity.
+    _BOOKS = (('/home/bots/main', 'positions_binance.json'),
+              ('/home/bots/reverse', 'positions_reverse.json'),
+              ('/home/bots/spot', 'positions_spot.json'))
+    _EQ_DIR = '/home/bots/shared'
+
+    def _publish_equity(self, eq):
+        try:
+            os.makedirs(self._EQ_DIR, exist_ok=True)
+            p = os.path.join(self._EQ_DIR, 'equity_%s.json' % BOOK_NAME)
+            tmp = p + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump({'equity': float(eq), 'ts': time.time()}, f)
+            os.replace(tmp, p)
+        except Exception as e:
+            log.debug('publish equity failed: %s' % e)
+
+    def _refresh_shared_equity(self):
+        """Publish THIS book's equity so the other two can see it.
+        Called from the balance refresh each loop - publishing only
+        after an entry deadlocked the cap (no entry -> no equity ->
+        cap blocks -> still no entry)."""
+        try:
+            d = self.client.balance_detail(getattr(self, 'paper_balance', 0))
+            self._publish_equity((d or {}).get('equity') or self.balance)
+        except Exception:
+            try: self._publish_equity(self.balance)
+            except Exception: pass
+
+    def portfolio_exposure(self):
+        """(net_usd, gross_usd, total_equity) across every book."""
+        net = gross = 0.0
+        for d, f in self._BOOKS:
+            try:
+                pos = json.load(open(os.path.join(d, f), encoding='utf-8'))['positions']
+            except Exception:
+                continue
+            for _s, v in pos.items():
+                n = abs(float(v.get('size_usd') or 0))
+                gross += n
+                net += n if v.get('direction') == 'long' else -n
+        # Equity must be COMPLETE before it can be compared against total
+        # exposure. With only one book reporting, $7,630 of exposure was
+        # measured against $1,731 of equity - 441% - and longs were
+        # blocked everywhere on a data gap rather than a real breach.
+        eq = 0.0
+        seen = 0
+        try:
+            for fn in os.listdir(self._EQ_DIR):
+                if fn.startswith('equity_') and fn.endswith('.json'):
+                    d = json.load(open(os.path.join(self._EQ_DIR, fn), encoding='utf-8'))
+                    if time.time() - float(d.get('ts', 0)) < 1800:
+                        eq += float(d.get('equity', 0) or 0)
+                        seen += 1
+        except Exception:
+            pass
+        if seen < len(self._BOOKS):
+            return net, gross, 0.0        # incomplete -> caller fails open
+        # eq == 0 means the shared files are missing or stale. Fail OPEN:
+        # falling back to this bot's own balance made net/equity read
+        # 455% and would have blocked every entry on every book, with a
+        # deadlock on top - equity was only published after an entry.
+        return net, gross, eq
+
+    def portfolio_blocks(self, direction):
+        """True if opening in this direction would breach the portfolio cap."""
+        cap = float(getattr(config, 'MAX_PORTFOLIO_EXPOSURE_PCT', 0) or 0)
+        if cap <= 0:
+            return False
+        net, gross, eq = self.portfolio_exposure()
+        if eq <= 0:
+            return False          # cannot measure -> do not block
+        pct = net / eq * 100.0
+        adding_long = (direction == 'long')
+        # only block the side that makes the imbalance WORSE
+        if adding_long and pct >= cap:
+            self.emit('info', '⛔ portfolio is %+.0f%% net long of $%.0f equity '
+                              '(cap %.0f%%) - no new longs' % (pct, eq, cap))
+            return True
+        if (not adding_long) and pct <= -cap:
+            self.emit('info', '⛔ portfolio is %+.0f%% net short of $%.0f equity '
+                              '(cap %.0f%%) - no new shorts' % (pct, eq, cap))
+            return True
+        return False
+
     def compute_exits(self, direction: str, entry: float, atr: float, sym: str = '') -> dict:
         sign   = +1 if direction == 'long' else -1
         is_maj = sym in config.MAJOR_LEVERAGE
@@ -1677,6 +1772,7 @@ class AlphaBot:
             self.peak_bal    = self.balance
             self.daily_start = self.balance
             self.emit('info', f"💰 {'📄 PAPER' if config.PAPER_MODE else '🔴 LIVE'} MODE | Balance: ${self.balance:.4f} {QUOTE}")
+            self._refresh_shared_equity()   # publish for the cross-book cap
             await self._reconcile_positions()
         else:
             await asyncio.sleep(20)   # let scan_loop finish its boot first
@@ -1764,6 +1860,8 @@ class AlphaBot:
         if sym in self.positions or not self.guards_ok(): return
         if time.time() < self._sym_cooldown.get(sym, 0): return
         direction = r['direction']
+        if self.portfolio_blocks(direction):
+            return
         conf      = min(95.0, abs(r['score']) / 2.5 * 100)
         # Was a flat config.BTC_CHART_LEV (10). At 10x a 7% ROI stop is a
         # 0.7% price move - inside BTC's own noise, the exact defect the
@@ -1823,7 +1921,7 @@ class AlphaBot:
         }
         self._place_exchange_guards(sym, self.positions[sym])
         self._save_positions()
-        self.balance = self.client.usdt_balance(self.paper_balance)
+        self.balance = self.client.usdt_balance(self.paper_balance); self._refresh_shared_equity()
         v = r['votes']
         self.emit('exec',
             f"📊[CHART] {'LONG' if direction == 'long' else 'SHORT'} {sym} @ {entry:.2f} | "
@@ -1877,6 +1975,8 @@ class AlphaBot:
                 return
 
         direction = a['direction']
+        if self.portfolio_blocks(direction):
+            return
         min_conf  = session_min_conf()
         if sym in config.MAJOR_LEVERAGE:
             min_conf -= config.MAJOR_CONF_DISCOUNT   # majors: cleaner signals, lower bar
@@ -2314,7 +2414,7 @@ class AlphaBot:
                                 'runner': is_runner, **self._feat(a)})
         if config.PAPER_MODE:
             self.paper_balance -= qty * entry / lev
-        self.balance = self.client.usdt_balance(self.paper_balance)
+        self.balance = self.client.usdt_balance(self.paper_balance); self._refresh_shared_equity()
         pats  = ', '.join(a['patterns']) if a['patterns'] else '—'
         star  = '⭐' if is_major else ''
         self.emit('exec',
@@ -2579,7 +2679,7 @@ class AlphaBot:
             self.paper_balance += pnl_usd + closed_usd / pos.get('leverage', config.LEVERAGE)
         pos['qty']      = round(pos['qty'] - part, 8)
         pos['size_usd'] = round(pos['qty'] * entry, 4)
-        self.balance = self.client.usdt_balance(self.paper_balance)
+        self.balance = self.client.usdt_balance(self.paper_balance); self._refresh_shared_equity()
         self.emit('exec',
             f"💰 TP1 BANKED {sym}: {frac*100:.0f}% closed @ {fill_px:.6g} → "
             f"{pnl_usd:+.4f}$ | runner qty={pos['qty']} → TP2={pos['tp2']:.5g}")
