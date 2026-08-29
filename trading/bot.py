@@ -3255,6 +3255,13 @@ class AlphaBot:
                                         pos['entry']    = ap
                                         pos['size_usd'] = round(pos['qty'] * ap, 4)
                                         ex = self.compute_exits(pos['direction'], ap, pos['atr'], sym)
+                                        # RECONCILE MUST CLAMP TOO. Without this the
+                                        # raw ATR stop (~-7% ROI) overwrote the
+                                        # configured -25% one on every restart, so
+                                        # positions were being stopped out at -5.7%
+                                        # to -10.7% while the config said -25%.
+                                        ex = self._clamp_sl_roi(pos['direction'], ap,
+                                                                pos.get('leverage', 1) or 1, ex)
                                         pos.update({'sl': ex['sl'], 'tp1': ex['tp1'],
                                                     'tp2': ex['tp2'], 'tp3': ex['tp3'],
                                                     'trail_sl': ex['sl']})
