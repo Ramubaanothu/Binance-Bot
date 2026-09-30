@@ -1,0 +1,18 @@
+[Unit]
+Description=Deal bot (Amazon/Flipkart 90%+ loot alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bots
+WorkingDirectory=/home/bots/dealbot
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/bots/venv/bin/python -m dealbot run
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

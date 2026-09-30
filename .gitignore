@@ -36,3 +36,9 @@ trading/balance_history.json
 trading/*_archive_*.json
 *.bak
 New folder/
+
+# ── Deal bot: secrets + Telegram login session + dedupe db ───────────────
+deal-bot/.env
+deal-bot/*.session
+deal-bot/*.session-journal
+deal-bot/seen.sqlite3
