@@ -20,3 +20,36 @@ class Seen:
             self.db.execute('INSERT INTO seen VALUES (?, ?)', (key, now))
         self.db.commit()
         return row is None
+
+
+IST = 5.5 * 3600
+
+
+class Orders:
+    """Order attempts, for the daily cap and never buying one ASIN twice.
+
+    'unknown' (clicked Place order but no confirmation seen) counts as
+    placed: better to under-order than to double-order.
+    """
+    COUNTED = ('placed', 'unknown')
+
+    def __init__(self, path):
+        self.db = sqlite3.connect(path)
+        self.db.execute('CREATE TABLE IF NOT EXISTS orders '
+                        '(asin TEXT, ts REAL, status TEXT, price REAL, note TEXT)')
+        self.db.commit()
+
+    def today_count(self, now=None):
+        now = time.time() if now is None else now
+        ist_midnight = now - (now + IST) % 86400
+        q = 'SELECT COUNT(*) FROM orders WHERE ts >= ? AND status IN (?, ?)'
+        return self.db.execute(q, (ist_midnight,) + self.COUNTED).fetchone()[0]
+
+    def already_ordered(self, asin):
+        q = 'SELECT 1 FROM orders WHERE asin = ? AND status IN (?, ?)'
+        return self.db.execute(q, (asin,) + self.COUNTED).fetchone() is not None
+
+    def record(self, asin, status, price=None, note=''):
+        self.db.execute('INSERT INTO orders VALUES (?, ?, ?, ?, ?)',
+                        (asin, time.time(), status, price, note))
+        self.db.commit()

@@ -42,3 +42,8 @@ deal-bot/.env
 deal-bot/*.session
 deal-bot/*.session-journal
 deal-bot/seen.sqlite3
+# Amazon login (browser profile + exported cookies) and order screenshots
+deal-bot/browser-profile/
+deal-bot/screenshots/
+deal-bot/*cookies*.json
+deal-bot/*cookies*.txt

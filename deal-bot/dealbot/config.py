@@ -47,3 +47,18 @@ ALERT_ON_GLITCH_WORDS = _bool('ALERT_ON_GLITCH_WORDS', True)
 DEDUPE_HOURS = float(os.environ.get('DEDUPE_HOURS', 6))
 
 DB_PATH = str(ROOT / 'seen.sqlite3')
+
+# ── Amazon auto-order (paid from Amazon Pay balance only) ─────────────────
+AUTO_ORDER = _bool('AUTO_ORDER', False)
+# true = go all the way to "Place your order", screenshot, and stop there.
+ORDER_DRY_RUN = _bool('ORDER_DRY_RUN', False)
+# Optional extra caps; 0 = off. The Amazon Pay balance is always a hard limit:
+# an order whose total the balance does not fully cover is never placed.
+MAX_ORDER_PRICE = float(os.environ.get('MAX_ORDER_PRICE', 0))     # order total, ₹
+MAX_ORDERS_PER_DAY = int(os.environ.get('MAX_ORDERS_PER_DAY', 0))  # IST calendar day
+# The browser profile holds your Amazon login. Treat the folder like a password.
+BROWSER_PROFILE = str(ROOT / os.environ.get('BROWSER_PROFILE', 'browser-profile'))
+HEADLESS = _bool('HEADLESS', True)
+CHROMIUM_PATH = os.environ.get('CHROMIUM_PATH') or None   # default: Playwright's own
+AMAZON_BASE = os.environ.get('AMAZON_BASE', 'https://www.amazon.in').rstrip('/')
+SCREENSHOT_DIR = str(ROOT / 'screenshots')

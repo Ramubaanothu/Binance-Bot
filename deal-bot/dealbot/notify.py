@@ -7,6 +7,7 @@ import html
 import json
 import urllib.parse
 import urllib.request
+import uuid
 
 NAMES = {'amazon': 'Amazon', 'flipkart': 'Flipkart'}
 
@@ -43,4 +44,31 @@ def send(token, chat_id, text, link, platform):
     }
     url = 'https://api.telegram.org/bot{}/sendMessage'.format(token)
     with urllib.request.urlopen(url, urllib.parse.urlencode(params).encode(), timeout=15) as r:
+        return json.loads(r.read())
+
+
+def send_text(token, chat_id, text):
+    url = 'https://api.telegram.org/bot{}/sendMessage'.format(token)
+    data = urllib.parse.urlencode({'chat_id': chat_id, 'text': text,
+                                   'parse_mode': 'HTML',
+                                   'disable_web_page_preview': 'true'}).encode()
+    with urllib.request.urlopen(url, data, timeout=15) as r:
+        return json.loads(r.read())
+
+
+def send_photo(token, chat_id, path, caption=''):
+    boundary = uuid.uuid4().hex
+    parts = []
+    for k, v in (('chat_id', str(chat_id)), ('caption', caption[:1000]), ('parse_mode', 'HTML')):
+        parts.append('--{}\r\nContent-Disposition: form-data; name="{}"\r\n\r\n{}\r\n'
+                     .format(boundary, k, v).encode())
+    with open(path, 'rb') as f:
+        img = f.read()
+    parts.append('--{}\r\nContent-Disposition: form-data; name="photo"; filename="shot.png"\r\n'
+                 'Content-Type: image/png\r\n\r\n'.format(boundary).encode() + img + b'\r\n')
+    parts.append('--{}--\r\n'.format(boundary).encode())
+    req = urllib.request.Request(
+        'https://api.telegram.org/bot{}/sendPhoto'.format(token), data=b''.join(parts),
+        headers={'Content-Type': 'multipart/form-data; boundary=' + boundary})
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())

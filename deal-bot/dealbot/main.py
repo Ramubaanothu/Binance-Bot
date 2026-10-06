@@ -9,7 +9,7 @@ from urllib.parse import urljoin
 
 from telethon import TelegramClient, events
 
-from . import config, notify
+from . import autobuy, config, notify
 from .parse import analyse, product_key
 from .store import Seen
 
@@ -76,7 +76,7 @@ def wanted(deal):
     return config.ALERT_ON_GLITCH_WORDS and deal.glitch_words
 
 
-async def handle(event, seen):
+async def handle(event, seen, orderer=None):
     msg = event.message
     text = msg.message or ''
     deal = analyse(text, hidden_urls(msg))
@@ -88,6 +88,10 @@ async def handle(event, seen):
     if not seen.check_and_add(key):
         log.info('duplicate %s', key)
         return
+
+    # Start the order before sending the alert: seconds matter on a glitch.
+    if orderer is not None:
+        orderer.submit(deal, product_key(link))
 
     chat = await event.get_chat()
     source = getattr(chat, 'title', None) or getattr(chat, 'username', None) or str(event.chat_id)
@@ -102,6 +106,31 @@ async def handle(event, seen):
         await event.client.send_message('me', body + '\n' + link, parse_mode='html')
 
 
+async def check_amazon_login(orderer):
+    """Open the browser at startup (so the first order is fast) and warn if
+    the Amazon cookies are missing or expired."""
+    b = orderer.buyer
+    await b.start()
+    page = await b.ctx.new_page()
+    try:
+        await page.goto(config.AMAZON_BASE + '/', wait_until='domcontentloaded')
+        ok = await b.logged_in(page)
+    except Exception:
+        log.exception('could not open Amazon')
+        ok = False
+    finally:
+        await page.close()
+    mode = 'DRY RUN' if config.ORDER_DRY_RUN else 'LIVE'
+    if ok:
+        log.info('auto-order %s: logged in to Amazon', mode)
+        await orderer.say('\U0001F7E2 Deal bot started. Auto-order is <b>{}</b>, paying from '
+                           'Amazon Pay balance only.'.format(mode))
+    else:
+        log.warning('auto-order on, but not logged in to Amazon')
+        await orderer.say('\U0001F534 Deal bot started, but it is <b>not logged in to Amazon</b>. '
+                           'Orders will fail until you import fresh cookies.')
+
+
 def client():
     if not (config.API_ID and config.API_HASH):
         raise SystemExit('Set TG_API_ID and TG_API_HASH in deal-bot/.env (from my.telegram.org).')
@@ -110,6 +139,9 @@ def client():
 
 async def run():
     seen = Seen(config.DB_PATH, config.DEDUPE_HOURS)
+    orderer = autobuy.from_config()
+    if orderer is not None:
+        await check_amazon_login(orderer)
     tg = client()
     await tg.start()
     chats = config.CHANNELS or None
@@ -118,7 +150,7 @@ async def run():
         if chats is None and not event.is_channel:
             return
         try:
-            await handle(event, seen)
+            await handle(event, seen, orderer)
         except Exception:
             log.exception('failed on message %s in %s', event.message.id, event.chat_id)
 
